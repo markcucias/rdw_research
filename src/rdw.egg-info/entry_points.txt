@@ -1,0 +1,2 @@
+[console_scripts]
+rdw-classical = classical_prior.cli:cli_entry
