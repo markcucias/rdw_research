@@ -1,0 +1,25 @@
+road_prior:
+  model: "yolop"
+  model_path: "models/yolop-640-640.onnx"
+  input_size: [640, 640]
+  normalize: true
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+  threshold: 0.5
+  providers: ["CPUExecutionProvider"]
+  downsample_every: 1
+
+hsv:
+  white_lower: [0, 0, 200]
+  white_upper: [180, 30, 255]
+
+canny:
+  low: 80
+  high: 160
+
+hough:
+  rho: 1.0
+  theta_deg: 1.0
+  threshold: 30
+  min_len: 40
+  max_gap: 20
