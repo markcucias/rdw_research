@@ -1,7 +1,10 @@
 [project]
 name = "rdw"
 version = "0.1.0"
-description = "Add your description here"
+description = "Self Driving Challenge perception algorithms"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
