@@ -1,14 +1,29 @@
 import typer
+from pathlib import Path
+
 
 # Define the Typer-powered function
 def main(
     source: str = typer.Argument(..., help="Folder of images, single image, video file, or 'camera:0'"),
+    cfg: Path = typer.Option(Path("configs/classical_prior.yaml"), help="Path to YAML config"),
     display: bool = typer.Option(False, help="Preview frames in a window (testing only)"),
 ):
     """
     Single-command CLI: reads frames from SOURCE and processes them headlessly by default.
     Use --display to preview during development; keep it headless for deployment.
     """
+    
+    from common.io import load_yaml, ConfigError
+    try:
+        config = load_yaml(cfg)
+    except ConfigError as e:
+        typer.echo(f"{e}")
+        raise typer.Exit(2)
+
+    # Checking if config loaded correctly
+    top_keys = ", ".join(sorted(config.keys())) if config else "(empty)"
+    typer.echo(f"Config loaded: {cfg}  keys: {top_keys}")
+    
     from common.video import open_source 
     cap = open_source(source)
 

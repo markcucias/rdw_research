@@ -7,28 +7,12 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.3.4",
     "onnxruntime>=1.23.2",
-    "opencv-python-headless>=4.11.0.86",
-    "pyyaml>=6.0.3",
-    "rich>=14.2.0",
-    "typer>=0.20.0",
-]
-
-[tool.setuptools.packages.find]
-where = ["src"]
     "opencv-python>=4.11.0.86",
     "pyyaml>=6.0.3",
     "typer>=0.20.0",
 ]
 
-[dependency-groups]
-dev = [
-    "black>=25.11.0",
-    "pytest>=9.0.0",
-    "ruff>=0.14.4",
-]
-
 [project.scripts]
-rdw-classical = "classical_prior.cli:app"
 rdw-classical = "classical_prior.cli:cli_entry"
 
 
