@@ -8,3 +8,6 @@ dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.scripts]
+rdw-classical = "classical_prior.cli:app"
