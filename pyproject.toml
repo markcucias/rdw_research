@@ -15,6 +15,10 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+    "opencv-python>=4.11.0.86",
+    "pyyaml>=6.0.3",
+    "typer>=0.20.0",
+]
 
 [dependency-groups]
 dev = [
@@ -25,3 +29,15 @@ dev = [
 
 [project.scripts]
 rdw-classical = "classical_prior.cli:app"
+rdw-classical = "classical_prior.cli:cli_entry"
+
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
