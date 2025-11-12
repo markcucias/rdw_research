@@ -1,21 +1,25 @@
 prior:
-  model: "yolop"
-  model_path: "models/yolop-640-640.onnx"
-  input_size: [640, 640]          # [H, W] вход модели
-  normalize: true                # у многих onnx YOLOP нормализация уже внутри
-  mean: [0.485, 0.456, 0.406]      # остаются на месте, если включишь normalize:true
-  std:  [0.229, 0.224, 0.225]
-  threshold: 0.45         # чуть выше порог
-  providers: ["CPUExecutionProvider"]
-  downsample_every: 1
+  enabled: true
+  model: models/yolop-640-640.onnx
+  input_size: [640, 640]
+  threshold: 0.65
+  letterbox: true
+  mask_dilate: 11
+  horizon_ratio: 0.35
+  suppress_green: true
 
-  # ВАЖНО: явно выбираем выход и канал
-  output_name: "drive_area_seg"    # тензор: (1, 2, 640, 640)
-  output_channel: null             # 1 = класс "дорога" (0 = фон)
+
+kinematics:
+  fps: 30
+  meters_per_pixel_bottom: 0.01
+  assumed_lane_width_m: 3.5
 
 hsv:
   white_lower: [0, 0, 200]
-  white_upper: [180, 30, 255]
+  white_upper: [180, 40, 255]
+  yellow_lower: [15, 60, 120]
+  yellow_upper: [40, 255, 255]
+  mask_margin: 7
 
 canny:
   low: 80
