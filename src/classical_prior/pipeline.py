@@ -93,23 +93,26 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
 
         # 6) visualization
         vis = draw_lanes(frame.copy(), result)
+        # Draw black rectangle background and white text "FINAL LANES"
+        text = "FINAL LANES"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.7
+        thickness = 2
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
+        cv2.rectangle(vis, (0, 0), (text_width + 10, text_height + 10), (0, 0, 0), thickness=-1)
+        cv2.putText(vis, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
+
         if display:
-            # overlay x, v, α
-            cv2.putText(
-                vis,
-                f"x={x_m:+.2f} m   v={v_mps:.2f} m/s   alpha={np.degrees(alpha):+.1f} deg",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (30, 220, 255),
-                2,
-                cv2.LINE_AA,
-            )
             # fused mask overlay
             color = np.zeros_like(frame)
             color[..., 1] = mask
             color[..., 2] = mask
             mask_overlay = cv2.addWeighted(frame, 0.65, color, 0.35, 0.0)
+            # Draw black rectangle background and white text "FUSED PRIOR MASK"
+            text_mask = "FUSED PRIOR MASK"
+            (text_width_m, text_height_m), baseline_m = cv2.getTextSize(text_mask, font, scale, thickness)
+            cv2.rectangle(mask_overlay, (0, 0), (text_width_m + 10, text_height_m + 10), (0, 0, 0), thickness=-1)
+            cv2.putText(mask_overlay, text_mask, (5, text_height_m + 5), font, scale, (255, 255, 255), thickness)
 
             cv2.namedWindow("RDW - Fused Prior Mask", cv2.WINDOW_NORMAL)
             cv2.namedWindow("RDW - Classical (fusion)", cv2.WINDOW_NORMAL)
@@ -119,6 +122,45 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
             cv2.imshow("RDW - Fused Prior Mask", mask_overlay)
             cv2.imshow("RDW - Classical (fusion)", vis)
 
+            # Show debug images if present
+            if "hsv_mask" in result:
+                cv2.namedWindow("RDW - HSV Mask", cv2.WINDOW_NORMAL)
+                cv2.moveWindow("RDW - HSV Mask", 100, 500)
+                # Draw black rectangle background and white text "HSV MASK"
+                hsv_mask = result["hsv_mask"].copy()
+                text_hsv = "HSV MASK"
+                (tw, th), baseline = cv2.getTextSize(text_hsv, font, scale, thickness)
+                cv2.rectangle(hsv_mask, (0, 0), (tw + 10, th + 10), (0, 0, 0), thickness=-1)
+                cv2.putText(hsv_mask, text_hsv, (5, th + 5), font, scale, (255, 255, 255), thickness)
+                cv2.imshow("RDW - HSV Mask", hsv_mask)
+            if "edges" in result:
+                cv2.namedWindow("RDW - Edges", cv2.WINDOW_NORMAL)
+                cv2.moveWindow("RDW - Edges", 400, 500)
+                edges_img = result["edges"].copy()
+                text_edges = "CANNY EDGES"
+                (tw, th), baseline = cv2.getTextSize(text_edges, font, scale, thickness)
+                cv2.rectangle(edges_img, (0, 0), (tw + 10, th + 10), (0, 0, 0), thickness=-1)
+                cv2.putText(edges_img, text_edges, (5, th + 5), font, scale, (255, 255, 255), thickness)
+                cv2.imshow("RDW - Edges", edges_img)
+            if "edges_masked" in result:
+                cv2.namedWindow("RDW - Masked Edges", cv2.WINDOW_NORMAL)
+                cv2.moveWindow("RDW - Masked Edges", 700, 500)
+                edges_masked_img = result["edges_masked"].copy()
+                text_masked = "MASKED EDGES"
+                (tw, th), baseline = cv2.getTextSize(text_masked, font, scale, thickness)
+                cv2.rectangle(edges_masked_img, (0, 0), (tw + 10, th + 10), (0, 0, 0), thickness=-1)
+                cv2.putText(edges_masked_img, text_masked, (5, th + 5), font, scale, (255, 255, 255), thickness)
+                cv2.imshow("RDW - Masked Edges", edges_masked_img)
+            if "hough_vis" in result:
+                cv2.namedWindow("RDW - Hough Lines", cv2.WINDOW_NORMAL)
+                cv2.moveWindow("RDW - Hough Lines", 1000, 500)
+                hough_vis_img = result["hough_vis"].copy()
+                text_hough = "HOUGH LINES"
+                (tw, th), baseline = cv2.getTextSize(text_hough, font, scale, thickness)
+                cv2.rectangle(hough_vis_img, (0, 0), (tw + 10, th + 10), (0, 0, 0), thickness=-1)
+                cv2.putText(hough_vis_img, text_hough, (5, th + 5), font, scale, (255, 255, 255), thickness)
+                cv2.imshow("RDW - Hough Lines", hough_vis_img)
+
             wait = 0 if getattr(cap, "single_image", False) else 1
             if (cv2.waitKey(wait) & 0xFF) == 27:
                 break
@@ -126,7 +168,7 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         frames += 1
         last_vis = vis
 
-        print(f"{x_m:.4f},{v_mps:.4f},{alpha:.6f}")
+        print(f"{source} | x={x_m:+.3f} | v={v_mps:+.3f} | alpha={np.degrees(alpha):+.2f}°")
 
     cap.release()
     if display and last_vis is not None:
