@@ -26,7 +26,8 @@ def detect_lanes(
       5) Split segments into left/right and fit one line per side.
 
     Returns:
-      dict with raw "segments" and fitted "left_line"/"right_line" (or None).
+      dict with raw "segments" and fitted "left_line"/"right_line" (or None),
+      plus debug images: "hsv_mask", "edges", "edges_masked", "hough_vis".
     """
     h, w = bgr.shape[:2]
 
@@ -43,10 +44,27 @@ def detect_lanes(
     binm = cv2.bitwise_or(bin_white, bin_yellow)
     binm = cv2.morphologyEx(binm, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
+    # Save debug hsv_mask
+    hsv_mask = binm.copy()
+    text = "HSV MASK"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.7
+    thickness = 2
+    (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
+    cv2.rectangle(hsv_mask, (0, 0), (text_width + 10, text_height + 10), (0, 0, 0), thickness=-1)
+    cv2.putText(hsv_mask, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
+
     # (2) edges
     low = int(canny_cfg.get("low", 80))
     high = int(canny_cfg.get("high", 160))
     edges = cv2.Canny(binm, low, high)
+    text = "CANNY EDGES"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.7
+    thickness = 2
+    (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
+    cv2.rectangle(edges, (0, 0), (text_width + 10, text_height + 10), (0, 0, 0), thickness=-1)
+    cv2.putText(edges, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
 
     # (3) late mask gate with margin
     edges_masked = edges
@@ -58,6 +76,13 @@ def detect_lanes(
         else:
             rm = road_mask
         edges_masked = cv2.bitwise_and(edges, edges, mask=rm)
+    text = "MASKED EDGES"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.7
+    thickness = 2
+    (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
+    cv2.rectangle(edges_masked, (0, 0), (text_width + 10, text_height + 10), (0, 0, 0), thickness=-1)
+    cv2.putText(edges_masked, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
 
     # (4) Hough with fallbacks
     rho       = float(hough_cfg.get("rho", 1.0))
@@ -87,12 +112,32 @@ def detect_lanes(
     if not segments and road_mask is not None:
         segments = hough_run(edges)
 
+    # (4b) create hough_vis image
+    hough_vis = bgr.copy()
+    for (x1, y1, x2, y2) in segments:
+        cv2.line(hough_vis, (x1, y1), (x2, y2), (0, 255, 0), 2, cv2.LINE_AA)
+    text = "HOUGH LINES"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.7
+    thickness = 2
+    (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
+    cv2.rectangle(hough_vis, (0, 0), (text_width + 10, text_height + 10), (0, 0, 0), thickness=-1)
+    cv2.putText(hough_vis, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
+
     # (5) group and fit
     left_segs, right_segs = _split_left_right(segments, w, h)
     left_fit = _fit_line_from_segments(left_segs, h)
     right_fit = _fit_line_from_segments(right_segs, h)
 
-    return {"segments": segments, "left_line": left_fit, "right_line": right_fit}
+    return {
+        "segments": segments,
+        "left_line": left_fit,
+        "right_line": right_fit,
+        "hsv_mask": hsv_mask,
+        "edges": edges,
+        "edges_masked": edges_masked,
+        "hough_vis": hough_vis,
+    }
 
 
 def draw_lanes(img: np.ndarray, result: Dict[str, Any]) -> np.ndarray:
