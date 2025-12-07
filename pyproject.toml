@@ -12,8 +12,11 @@ dependencies = [
     "typer>=0.20.0",
 ]
 
+
 [project.scripts]
 rdw-classical = "classical_prior.cli:cli_entry"
+rdw-motion    = "motion_fusion.cli:cli_entry"
+
 
 
 [build-system]

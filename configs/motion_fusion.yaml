@@ -1,0 +1,22 @@
+lanenet:
+  enabled: true
+  model: models/yolop-640-640.onnx
+  input_size: [640, 640]
+  threshold: 0.65
+  letterbox: true
+
+odometry:
+  orb_nfeatures: 1000
+  ransac_thresh: 3.0
+  min_matches: 60
+
+filters:
+  kalman:
+    process_noise: 0.05
+    meas_noise_lane: 0.2
+    initial_cov: 1.0
+
+kinematics:
+  meters_per_pixel_bottom: 0.01
+  lane_bottom_ratio: 0.4
+  fps: 30.0
