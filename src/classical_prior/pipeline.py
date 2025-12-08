@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Dict, Any
 import cv2
 import numpy as np
+import time
 
 from common.video import open_source
 from .classical_ops import detect_lanes, draw_lanes, evaluate_detection_quality
@@ -62,11 +63,16 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
 
     frames = 0
     last_vis = None
+    
+    full_times = []
+    classical_times = []
 
     # ======================================================================
     # MAIN LOOP
     # ======================================================================
     while True:
+        t0_full = time.perf_counter()
+        
         ok, frame = cap.read()
         if not ok:
             break
@@ -135,7 +141,16 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         # ================================================================
         # 8. CLASSICAL LANE EXTRACTION
         # ================================================================
+        t1_full = time.perf_counter()
+        t0_class = time.perf_counter()
+        
         result = detect_lanes(frame, mask, hsvcfg, canny, hough)
+        
+        t1_full = time.perf_counter()
+        full_times.append((t1_full - t0_full) * 1000)
+        
+        t1_class = time.perf_counter()
+        classical_times.append((t1_class - t0_class) * 1000)
 
         # Evaluate quality (used for robustness later)
         quality = evaluate_detection_quality(result, w_img, h_img)
@@ -215,5 +230,13 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
             cv2.imshow("RDW - Classical (fusion) - last", last_vis)
             cv2.waitKey(0)
         cv2.destroyAllWindows()
+        
+    if full_times:
+        avg_full = sum(full_times) / len(full_times)
+        print(f"\nAverage FULL pipeline time: {avg_full:.2f} ms ({1000/avg_full:.1f} FPS)")
+
+    if classical_times:
+        avg_class = sum(classical_times) / len(classical_times)
+        print(f"Average CLASSICAL-ONLY time: {avg_class:.2f} ms ({1000/avg_class:.1f} FPS)")
 
     return frames
