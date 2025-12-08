@@ -42,7 +42,24 @@ def detect_lanes(
     bin_yellow = cv2.inRange(hsv, yellow_lower, yellow_upper)
 
     binm = cv2.bitwise_or(bin_white, bin_yellow)
-    binm = cv2.morphologyEx(binm, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+    # 1. Stronger OPEN (remove isolated dots)
+    binm = cv2.morphologyEx(binm, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+
+    # 2. CLOSE (connect broken lane pixels)
+    binm = cv2.morphologyEx(binm, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+
+    # 3. Remove small areas
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binm, connectivity=8)
+    min_area = 200  # tune: 100–400 depending on image size
+
+    clean = np.zeros_like(binm)
+    for i in range(1, num_labels):       # skip background (0)
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area >= min_area:
+            clean[labels == i] = 255
+
+    binm = clean
 
     # Save debug hsv_mask
     hsv_mask = binm.copy()
@@ -59,6 +76,17 @@ def detect_lanes(
     high = int(canny_cfg.get("high", 160))
     edges = cv2.Canny(binm, low, high)
     text = "CANNY EDGES"
+    # --- remove tiny noisy Canny components ---
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(edges, connectivity=8)
+    clean_edges = np.zeros_like(edges)
+
+    min_edge_area = 150   # tune: 100–300 depending on noise level
+
+    for i in range(1, num_labels):  # skip background
+        if stats[i, cv2.CC_STAT_AREA] >= min_edge_area:
+            clean_edges[labels == i] = 255
+
+    edges = clean_edges
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.7
     thickness = 2
@@ -66,8 +94,13 @@ def detect_lanes(
     cv2.rectangle(edges, (0, 0), (text_width + 10, text_height + 10), (0, 0, 0), thickness=-1)
     cv2.putText(edges, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
 
+    # Horizon cutoff: remove edges above ~35% height
+    horizon = int(0.35 * h)
+    edges[:horizon, :] = 0
+
     # (3) late mask gate with margin
     edges_masked = edges
+    edges_masked = cv2.morphologyEx(edges_masked, cv2.MORPH_OPEN, np.ones((7,7), np.uint8))
     if road_mask is not None:
         margin = int(hsv_cfg.get("mask_margin", 7))
         if margin > 0:
@@ -76,6 +109,8 @@ def detect_lanes(
         else:
             rm = road_mask
         edges_masked = cv2.bitwise_and(edges, edges, mask=rm)
+        # Apply same horizon cutoff
+        edges_masked[:horizon, :] = 0
     text = "MASKED EDGES"
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.7
@@ -121,7 +156,7 @@ def detect_lanes(
     scale = 0.7
     thickness = 2
     (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
-    cv2.rectangle(hough_vis, (0, 0), (text_width + 10, text_height + 10), (0, 0, 0), thickness=-1)
+    cv2.rectangle(hough_vis, (0, 0), (text_width + 20, text_height + 20), (0, 0, 0), thickness=-1)
     cv2.putText(hough_vis, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
 
     # (5) group and fit
@@ -207,3 +242,67 @@ def _fit_line_from_segments(segments: List[Line], img_h: int) -> FitLine:
         return int(x0 + t * vx)
 
     return (x_at(yb), yb, x_at(yh), yh)
+
+
+
+
+def evaluate_detection_quality(result: Dict[str, Any], img_w: int, img_h: int) -> Dict[str, bool]:
+    """
+    Returns a dictionary summarizing whether the current detection is valid.
+
+    Fields:
+      - valid_left:    left line exists and looks reasonable
+      - valid_right:   right line exists and looks reasonable
+      - too_many_segs: too many segments (noise)
+      - crossing:      left/right geometrically inconsistent
+      - valid_frame:   both lanes OK and no major issues
+    """
+    left  = result.get("left_line")
+    right = result.get("right_line")
+    segs  = result.get("segments", [])
+
+    def is_valid(line):
+        if line is None:
+            return False
+        x1, y1, x2, y2 = line
+        dx = x2 - x1
+        dy = y2 - y1
+        slope = dy / (dx + 1e-9)
+        if abs(slope) < 0.3:
+            return False
+        return True
+
+    valid_left  = is_valid(left)
+    valid_right = is_valid(right)
+
+    # too many noisy segments
+    too_many_segs = len(segs) > 12
+
+    # check crossing (only if both lines exist)
+    crossing = False
+    if valid_left and valid_right:
+        lx1, ly1, lx2, ly2 = left
+        rx1, ry1, rx2, ry2 = right
+
+        # compare at bottom
+        if lx1 > rx1:
+            crossing = True
+
+        # compare at mid
+        mid_y = img_h // 2
+        def x_at(line, y):
+            x1, y1, x2, y2 = line
+            t = (y - y1) / (y2 - y1 + 1e-9)
+            return int(x1 + t * (x2 - x1))
+        if x_at(left, mid_y) > x_at(right, mid_y):
+            crossing = True
+
+    valid_frame = (valid_left and valid_right and not too_many_segs and not crossing)
+
+    return {
+        "valid_left": valid_left,
+        "valid_right": valid_right,
+        "too_many_segs": too_many_segs,
+        "crossing": crossing,
+        "valid_frame": valid_frame,
+    }
