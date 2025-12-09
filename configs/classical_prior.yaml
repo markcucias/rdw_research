@@ -4,7 +4,8 @@ prior:
   input_size: [640, 640]
   threshold: 0.65
   letterbox: true
-  mask_dilate: 12
+  mask_erode: 7
+  mask_dilate: 5
   horizon_ratio: 0.35
   suppress_green: true
 

@@ -28,6 +28,7 @@ uv sync
 Single image:
 ```bash
 uv run rdw-classical data/6.png
+uv run motion_fusion data/6.png --display
 ```
 
 Folder of images:
