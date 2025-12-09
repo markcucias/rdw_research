@@ -46,8 +46,10 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
 
     # --- kinematics ---
     fps   = float(kincfg.get("fps", 30.0))
-    mpp   = float(kincfg.get("meters_per_pixel_bottom", 0.01))
-    laneW = float(kincfg.get("assumed_lane_width_m", 3.5))
+
+    mpp   = float(kincfg.get("meters_per_pixel_bottom", 0.001))
+    laneW = float(kincfg.get("assumed_lane_width_m", 1.2))
+
 
     spd = SpeedEstimator(fps=fps, meters_per_pixel_bottom=mpp)
 
