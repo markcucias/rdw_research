@@ -4,10 +4,9 @@ prior:
   input_size: [640, 640]
   threshold: 0.65
   letterbox: true
-  mask_dilate: 11
+  mask_dilate: 12
   horizon_ratio: 0.35
   suppress_green: true
-
 
 kinematics:
   fps: 30
@@ -15,10 +14,11 @@ kinematics:
   assumed_lane_width_m: 1.2
 
 hsv:
-  white_lower: [0, 0, 200]
-  white_upper: [180, 40, 255]
-  yellow_lower: [15, 60, 120]
-  yellow_upper: [40, 255, 255]
+  white_lower: [0, 0, 190]
+  white_upper: [180, 60, 255]
+  yellow_lower: [10, 50, 100]
+  yellow_upper: [45, 255, 255]
+
   mask_margin: 7
 
 canny:
@@ -28,6 +28,6 @@ canny:
 hough:
   rho: 1.0
   theta_deg: 1.0
-  threshold: 30
-  min_len: 40
+  threshold: 60
+  min_len: 80
   max_gap: 20
