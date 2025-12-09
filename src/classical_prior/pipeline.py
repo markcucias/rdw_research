@@ -3,6 +3,8 @@ from typing import Dict, Any
 import cv2
 import numpy as np
 import time
+import csv
+from pathlib import Path
 
 from common.video import open_source
 from .classical_ops import detect_lanes, draw_lanes, evaluate_detection_quality
@@ -56,10 +58,17 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     # 3. Kinematics helpers
     # ----------------------------------------------------------------------
     fps   = float(kincfg.get("fps", 30.0))
-    mpp   = float(kincfg.get("meters_per_pixel_bottom", 0.01))
-    laneW = float(kincfg.get("assumed_lane_width_m", 3.5))
+    mpp   = float(kincfg.get("meters_per_pixel_bottom", 0.0015))
+    laneW = float(kincfg.get("assumed_lane_width_m", 1.2))
 
     spd_estimator = SpeedEstimator(fps=fps, meters_per_pixel_bottom=mpp)
+
+    metrics_path = Path("data/benchmark_classical.csv")
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_file = metrics_path.open("w", newline="")
+    metrics_writer = csv.writer(metrics_file)
+    metrics_writer.writerow(["frame_idx", "x_m", "alpha_deg", "v_mps", "dt_sec"])
+    prev_time = time.perf_counter()
 
     frames = 0
     last_vis = None
@@ -219,6 +228,17 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         last_vis = vis
 
         print(f"{source} | x={x_m:+.3f} | v={v_mps:+.3f} | alpha={np.degrees(alpha):+.2f}°")
+        t_now = time.perf_counter()
+        dt_sec = t_now - prev_time if frames > 0 else 0.0
+        prev_time = t_now
+
+        metrics_writer.writerow([
+            frames,
+            f"{x_m:.6f}",
+            f"{np.degrees(alpha):.3f}",
+            f"{v_mps:.6f}",
+            f"{dt_sec:.6f}",
+        ])
 
     # ----------------------------------------------------------------------
     # Cleanup
@@ -238,5 +258,6 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     if classical_times:
         avg_class = sum(classical_times) / len(classical_times)
         print(f"Average CLASSICAL-ONLY time: {avg_class:.2f} ms ({1000/avg_class:.1f} FPS)")
+    metrics_file.close()
 
     return frames
