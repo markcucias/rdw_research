@@ -70,7 +70,6 @@ def annotate_folder(
 
         while True:
             vis = img.copy()
-            # рисуем подсказку про нижнюю часть изображения
             cv2.putText(
                 vis,
                 f"Frame {frame_idx} - {img_path.name}",
@@ -168,7 +167,7 @@ def main():
     parser.add_argument(
         "--out",
         type=str,
-        default="data/gt_classical_x.csv",
+        default="data/gt_classical_x1.csv",
         help="Output CSV for ground truth.",
     )
     parser.add_argument(

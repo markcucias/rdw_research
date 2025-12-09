@@ -117,12 +117,14 @@ def main():
     mae = sum(abs_errors_all) / n
     rmse = math.sqrt(sum(e * e for e in abs_errors_all) / n)
     max_err = max(abs_errors_all)
+    min_err = min(abs_errors_all)  # ← добавили строку
 
     print("\n=== Classical + Prior accuracy (x) ===")
     print(f"Frames used   = {n}")
     print(f"MAE(x)        = {mae:.3f} m")
     print(f"RMSE(x)       = {rmse:.3f} m")
     print(f"Max |error|   = {max_err:.3f} m")
+    print(f"Min |error|   = {min_err:.3f} m")
 
     # --- метрики по сценариям (straight / curve / ...) ---
     print("\nPer-scenario MAE:")
