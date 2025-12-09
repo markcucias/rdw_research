@@ -10,7 +10,7 @@ prior:
 
 kinematics:
   fps: 30
-  meters_per_pixel_bottom: 0.001
+  meters_per_pixel_bottom: 0.0006
   assumed_lane_width_m: 1.2
 
 hsv:
