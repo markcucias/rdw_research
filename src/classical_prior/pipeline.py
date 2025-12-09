@@ -1,12 +1,76 @@
 from __future__ import annotations
-from typing import Dict, Any
+from typing import Dict, Any, List
+from dataclasses import dataclass, field
+from pathlib import Path
+from time import perf_counter
+
 import cv2
 import numpy as np
+
+
 
 from common.video import open_source
 from .classical_ops import detect_lanes, draw_lanes
 from .roadnet_runtime import PriorRuntime
 from .state import estimate_pose, SpeedEstimator
+
+
+# --------- простенький бенчмарк-логгер ---------
+
+@dataclass
+class FrameMetrics:
+    frame_idx: int
+    x_m: float
+    alpha_deg: float
+    v_mps: float
+    dt: float  # время обработки кадра в секундах
+
+
+@dataclass
+class BenchmarkLogger:
+    records: List[FrameMetrics] = field(default_factory=list)
+
+    def add(self, frame_idx: int, x_m: float, alpha_deg: float, v_mps: float, dt: float):
+        self.records.append(
+            FrameMetrics(
+                frame_idx=frame_idx,
+                x_m=float(x_m),
+                alpha_deg=float(alpha_deg),
+                v_mps=float(v_mps),
+                dt=float(dt),
+            )
+        )
+
+    def summary(self) -> Dict[str, float]:
+        if not self.records:
+            return {}
+
+        xs = [abs(r.x_m) for r in self.records]  # отклонение от центра по модулю
+        times = [r.dt for r in self.records]
+
+        mae_x = sum(xs) / len(xs)
+        max_x = max(xs)
+        avg_dt = sum(times) / len(times)
+        fps = 1.0 / avg_dt if avg_dt > 0 else 0.0
+
+        return {
+            "n_frames": len(self.records),
+            "mae_abs_x_m": mae_x,
+            "max_abs_x_m": max_x,
+            "avg_dt_ms": avg_dt * 1000.0,
+            "fps": fps,
+        }
+
+    def save_csv(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="") as f:
+            # без pandas, просто простой CSV
+            f.write("frame_idx,x_m,alpha_deg,v_mps,dt_sec\n")
+            for r in self.records:
+                f.write(
+                    f"{r.frame_idx},{r.x_m:.6f},{r.alpha_deg:.3f},"
+                    f"{r.v_mps:.6f},{r.dt:.6f}\n"
+                )
 
 
 def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
@@ -48,10 +112,15 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     frames = 0
     last_vis = None
 
+    # --- бенчмарк-логгер ---
+    bench = BenchmarkLogger()
+
     while True:
         ok, frame = cap.read()
         if not ok:
             break
+
+        t0 = perf_counter()
 
         # 1) prior probabilities (prefer DA+LL; fall back to binary if needed)
         if hasattr(prior, "infer_probs"):
@@ -91,8 +160,36 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         x_m, alpha = estimate_pose(result, frame.shape, mpp, assumed_lane_width_m=laneW)
         v_mps = spd.update(frame, mask)
 
+        t1 = perf_counter()
+        dt = t1 - t0
+
+        # угол в градусы – удобно для логгера и подписи
+        alpha_deg = float(np.degrees(alpha))
+
+        # логгируем метрики кадра
+        bench.add(
+            frame_idx=frames,
+            x_m=x_m,
+            alpha_deg=alpha_deg,
+            v_mps=v_mps,
+            dt=dt,
+        )
+
         # 6) visualization
         vis = draw_lanes(frame.copy(), result)
+
+        # подпишем x, v, alpha на финальном окне
+        metrics_text = f"x={x_m:+.2f} m  v={v_mps:+.2f} m/s  alpha={alpha_deg:+.1f} deg"
+        cv2.putText(
+            vis,
+            metrics_text,
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
+
         # Draw black rectangle background and white text "FINAL LANES"
         text = "FINAL LANES"
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -168,9 +265,25 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         frames += 1
         last_vis = vis
 
-        print(f"{source} | x={x_m:+.3f} | v={v_mps:+.3f} | alpha={np.degrees(alpha):+.2f}°")
+        # старый print можно оставить – полезно видеть по кадрам
+        print(f"{source} | x={x_m:+.3f} | v={v_mps:+.3f} | alpha={alpha_deg:+.2f}°")
 
     cap.release()
+
+    # --- сводка бенчмарка ---
+    summary = bench.summary()
+    if summary:
+        print("\n=== Classical + Neural Prior benchmark ===")
+        print(f"Frames        = {summary['n_frames']}")
+        print(f"MAE |x|       = {summary['mae_abs_x_m']:.3f} m")
+        print(f"Max |x|       = {summary['max_abs_x_m']:.3f} m")
+        print(f"Avg time      = {summary['avg_dt_ms']:.1f} ms/frame")
+        print(f"FPS           = {summary['fps']:.1f}")
+
+        out_csv = Path("data/benchmark_classical.csv")
+        bench.save_csv(out_csv)
+        print("Per-frame metrics saved to", out_csv)
+
     if display and last_vis is not None:
         if not getattr(cap, "single_image", False):
             cv2.imshow("RDW - Classical (fusion) - last", last_vis)
