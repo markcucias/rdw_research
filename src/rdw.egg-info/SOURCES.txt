@@ -5,6 +5,7 @@ src/classical_prior/classical_ops.py
 src/classical_prior/cli.py
 src/classical_prior/pipeline.py
 src/classical_prior/roadnet_runtime.py
+src/classical_prior/state.py
 src/common/__init__.py
 src/common/io.py
 src/common/video.py

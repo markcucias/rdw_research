@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 
 # Types for clarity
-Line = Tuple[int, int, int, int]     # (x1, y1, x2, y2)
+Line    = Tuple[int, int, int, int]  # (x1, y1, x2, y2)
 FitLine = Optional[Line]
 
 
@@ -23,11 +23,17 @@ def detect_lanes(
       2) Canny edges on that map.
       3) Apply the road mask *after* edges, with a small dilation margin.
       4) Hough segment detection; if nothing appears, relax the mask and finally try without it.
-      5) Split segments into left/right and fit one line per side.
+      5) Split segments into left/right (by where they hit the bottom of the frame) and
+         fit one straight line per side for pose estimation.
 
     Returns:
-      dict with raw "segments" and fitted "left_line"/"right_line" (or None),
-      plus debug images: "hsv_mask", "edges", "edges_masked", "hough_vis".
+      dict with:
+        - "segments":       all Hough segments
+        - "left_segments":  segments assigned to the left lane
+        - "right_segments": segments assigned to the right lane
+        - "left_line":      fitted line for left lane (or None)
+        - "right_line":     fitted line for right lane (or None)
+        - debug images: "hsv_mask", "edges", "edges_masked", "hough_vis"
     """
     h, w = bgr.shape[:2]
 
@@ -43,64 +49,59 @@ def detect_lanes(
 
     binm = cv2.bitwise_or(bin_white, bin_yellow)
 
-    # 1. Stronger OPEN (remove isolated dots)
-    binm = cv2.morphologyEx(binm, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    # Remove isolated dots, then connect broken lane pixels
+    binm = cv2.morphologyEx(binm, cv2.MORPH_OPEN,  np.ones((5, 5),  np.uint8))
+    binm = cv2.morphologyEx(binm, cv2.MORPH_CLOSE, np.ones((7, 7),  np.uint8))
 
-    # 2. CLOSE (connect broken lane pixels)
-    binm = cv2.morphologyEx(binm, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-
-    # 3. Remove small areas
+    # Remove tiny blobs
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binm, connectivity=8)
     min_area = 200  # tune: 100–400 depending on image size
 
     clean = np.zeros_like(binm)
-    for i in range(1, num_labels):       # skip background (0)
+    for i in range(1, num_labels):  # skip background (0)
         area = stats[i, cv2.CC_STAT_AREA]
         if area >= min_area:
             clean[labels == i] = 255
-
     binm = clean
 
-    # Save debug hsv_mask
+    # hsv_mask debug image
     hsv_mask = binm.copy()
     text = "HSV MASK"
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.7
     thickness = 2
-    (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
-    cv2.rectangle(hsv_mask, (0, 0), (text_width + 10, text_height + 10), (0, 0, 0), thickness=-1)
-    cv2.putText(hsv_mask, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+    cv2.rectangle(hsv_mask, (0, 0), (tw + 10, th + 10), (0, 0, 0), thickness=-1)
+    cv2.putText(hsv_mask, text, (5, th + 5), font, scale, (255, 255, 255), thickness)
 
     # (2) edges
-    low = int(canny_cfg.get("low", 80))
+    low  = int(canny_cfg.get("low", 80))
     high = int(canny_cfg.get("high", 160))
     edges = cv2.Canny(binm, low, high)
-    text = "CANNY EDGES"
-    # --- remove tiny noisy Canny components ---
+
+    # Remove small edge fragments
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(edges, connectivity=8)
     clean_edges = np.zeros_like(edges)
+    min_edge_area = 150  # tune 100–300
 
-    min_edge_area = 150   # tune: 100–300 depending on noise level
-
-    for i in range(1, num_labels):  # skip background
+    for i in range(1, num_labels):
         if stats[i, cv2.CC_STAT_AREA] >= min_edge_area:
             clean_edges[labels == i] = 255
-
     edges = clean_edges
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.7
-    thickness = 2
-    (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
-    cv2.rectangle(edges, (0, 0), (text_width + 10, text_height + 10), (0, 0, 0), thickness=-1)
-    cv2.putText(edges, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
 
-    # Horizon cutoff: remove edges above ~35% height
+    text = "CANNY EDGES"
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+    cv2.rectangle(edges, (0, 0), (tw + 10, th + 10), (0, 0, 0), thickness=-1)
+    cv2.putText(edges, text, (5, th + 5), font, scale, (255, 255, 255), thickness)
+
+    # Remove edges above horizon (~35% height)
     horizon = int(0.35 * h)
     edges[:horizon, :] = 0
 
     # (3) late mask gate with margin
-    edges_masked = edges
-    edges_masked = cv2.morphologyEx(edges_masked, cv2.MORPH_OPEN, np.ones((7,7), np.uint8))
+    edges_masked = edges.copy()
+    edges_masked = cv2.morphologyEx(edges_masked, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8))
+
     if road_mask is not None:
         margin = int(hsv_cfg.get("mask_margin", 7))
         if margin > 0:
@@ -109,15 +110,12 @@ def detect_lanes(
         else:
             rm = road_mask
         edges_masked = cv2.bitwise_and(edges, edges, mask=rm)
-        # Apply same horizon cutoff
         edges_masked[:horizon, :] = 0
+
     text = "MASKED EDGES"
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.7
-    thickness = 2
-    (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
-    cv2.rectangle(edges_masked, (0, 0), (text_width + 10, text_height + 10), (0, 0, 0), thickness=-1)
-    cv2.putText(edges_masked, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+    cv2.rectangle(edges_masked, (0, 0), (tw + 10, th + 10), (0, 0, 0), thickness=-1)
+    cv2.putText(edges_masked, text, (5, th + 5), font, scale, (255, 255, 255), thickness)
 
     # (4) Hough with fallbacks
     rho       = float(hough_cfg.get("rho", 1.0))
@@ -152,92 +150,134 @@ def detect_lanes(
     for (x1, y1, x2, y2) in segments:
         cv2.line(hough_vis, (x1, y1), (x2, y2), (0, 255, 0), 2, cv2.LINE_AA)
     text = "HOUGH LINES"
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.7
-    thickness = 2
-    (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
-    cv2.rectangle(hough_vis, (0, 0), (text_width + 20, text_height + 20), (0, 0, 0), thickness=-1)
-    cv2.putText(hough_vis, text, (5, text_height + 5), font, scale, (255, 255, 255), thickness)
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+    cv2.rectangle(hough_vis, (0, 0), (tw + 20, th + 20), (0, 0, 0), thickness=-1)
+    cv2.putText(hough_vis, text, (5, th + 5), font, scale, (255, 255, 255), thickness)
 
     # (5) group and fit
     left_segs, right_segs = _split_left_right(segments, w, h)
-    left_fit = _fit_line_from_segments(left_segs, h)
+    left_fit  = _fit_line_from_segments(left_segs, h)
     right_fit = _fit_line_from_segments(right_segs, h)
 
     return {
-        "segments": segments,
-        "left_line": left_fit,
-        "right_line": right_fit,
-        "hsv_mask": hsv_mask,
-        "edges": edges,
-        "edges_masked": edges_masked,
-        "hough_vis": hough_vis,
+        "segments":       segments,
+        "left_segments":  left_segs,
+        "right_segments": right_segs,
+        "left_line":      left_fit,
+        "right_line":     right_fit,
+        "hsv_mask":       hsv_mask,
+        "edges":          edges,
+        "edges_masked":   edges_masked,
+        "hough_vis":      hough_vis,
     }
 
 
 def draw_lanes(img: np.ndarray, result: Dict[str, Any]) -> np.ndarray:
     """
-    Overlay raw segments (thin green) and the fitted left/right lanes (thick colored).
-    """
-    out = img
-    for (x1, y1, x2, y2) in result.get("segments", []):
-        cv2.line(out, (x1, y1), (x2, y2), (0, 200, 0), 1, cv2.LINE_AA)
+    Visualize lanes.
 
-    if result.get("left_line") is not None:
-        x1, y1, x2, y2 = result["left_line"]
+    - Left lane:  draw Hough segments in one color (e.g. blue).
+    - Right lane: draw Hough segments in another color (e.g. orange).
+    - If left/right segment groups are missing, fall back to all segments in green.
+
+    Fitted lines (left_line/right_line) are still computed for pose and robustness,
+    but we do *not* draw them anymore to avoid weird extrapolated lines.
+    """
+    out = img.copy()
+
+    left_segs  = result.get("left_segments")
+    right_segs = result.get("right_segments")
+
+    if left_segs is None or right_segs is None:
+        # Fallback: just draw all segments in green
+        for (x1, y1, x2, y2) in result.get("segments", []):
+            cv2.line(out, (x1, y1), (x2, y2), (0, 200, 0), 2, cv2.LINE_AA)
+        return out
+
+    # Left lane segments (blue-ish)
+    for (x1, y1, x2, y2) in left_segs:
         cv2.line(out, (x1, y1), (x2, y2), (255, 100, 0), 3, cv2.LINE_AA)
-    if result.get("right_line") is not None:
-        x1, y1, x2, y2 = result["right_line"]
-        cv2.line(out, (x1, y1), (x2, y2), (0, 100, 255), 3, cv2.LINE_AA)
+
+    # Right lane segments (green/orange-ish)
+    for (x1, y1, x2, y2) in right_segs:
+        cv2.line(out, (x1, y1), (x2, y2), (0, 255, 100), 3, cv2.LINE_AA)
 
     return out
 
 
 # ---------- helpers ----------
 
-def _split_left_right(segments: List[Line], img_w: int, img_h: int) -> Tuple[List[Line], List[Line]]:
+def _split_left_right(
+    segments: List[Line],
+    img_w: int,
+    img_h: int,
+) -> Tuple[List[Line], List[Line]]:
     """
-    Separate segments by slope sign and horizontal location.
-    Negative slope left of center → left; positive slope right of center → right.
-    Reject nearly horizontal lines.
+    Separate segments into left/right by where they hit the *bottom* of the image.
+
+    For each segment, take the endpoint with the larger y (closer to the bottom).
+    If its x < center → left lane; else → right lane.
+
+    This is much more stable on curves than looking at slope sign.
     """
-    left, right = [], []
+    left: List[Line] = []
+    right: List[Line] = []
     cx = img_w * 0.5
 
     for x1, y1, x2, y2 in segments:
-        dx = (x2 - x1)
-        m = 1e9 if abs(dx) < 1 else (y2 - y1) / dx
-        if abs(m) < 0.3:
+        # endpoint closest to the bottom
+        if y1 > y2:
+            xb, yb = x1, y1
+        else:
+            xb, yb = x2, y2
+
+        # ignore segments that live too high (safety)
+        if yb < img_h * 0.4:
             continue
 
-        xm = 0.5 * (x1 + x2)
-        if m < 0 and xm < cx:
+        if xb < cx:
             left.append((x1, y1, x2, y2))
-        elif m > 0 and xm > cx:
+        else:
             right.append((x1, y1, x2, y2))
 
     return left, right
 
 
+    
+
 def _fit_line_from_segments(segments: List[Line], img_h: int) -> FitLine:
     """
-    Fit a single robust line (cv2.fitLine) through segment endpoints and
-    return it as a displayable segment from the image bottom to ~60% height.
+    Robust line fit using *all* segment endpoints.
+    Always returns a line if segments are present.
     """
     if not segments:
         return None
 
     pts = []
     for x1, y1, x2, y2 in segments:
-        pts.append([x1, y1]); pts.append([x2, y2])
-    pts = np.asarray(pts, dtype=np.float32)
+        pts.append([x1, y1])
+        pts.append([x2, y2])
 
-    vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).reshape(-1).tolist()
+    pts_np = np.asarray(pts, dtype=np.float32)
 
+    # Try a robust cv2.fitLine
+    try:
+        vx, vy, x0, y0 = cv2.fitLine(
+            pts_np, cv2.DIST_L2, 0, 0.01, 0.01
+        ).reshape(-1).tolist()
+    except:
+        # Fallback: average segment
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x_mean = int(np.mean(xs))
+        # draw vertical line as fallback
+        return (x_mean, img_h - 1, x_mean, int(img_h * 0.6))
+
+    # Extrapolate line to bottom and 60% height
     yb = img_h - 1
     yh = int(img_h * 0.6)
 
-    def x_at(y: float) -> int:
+    def x_at(y):
         t = (y - y0) / (vy + 1e-9)
         return int(x0 + t * vx)
 
@@ -248,61 +288,48 @@ def _fit_line_from_segments(segments: List[Line], img_h: int) -> FitLine:
 
 def evaluate_detection_quality(result: Dict[str, Any], img_w: int, img_h: int) -> Dict[str, bool]:
     """
-    Returns a dictionary summarizing whether the current detection is valid.
-
-    Fields:
-      - valid_left:    left line exists and looks reasonable
-      - valid_right:   right line exists and looks reasonable
-      - too_many_segs: too many segments (noise)
-      - crossing:      left/right geometrically inconsistent
-      - valid_frame:   both lanes OK and no major issues
+    A detection is valid if:
+      - left_segments exist
+      - right_segments exist
+      - left lane is left of right lane
     """
-    left  = result.get("left_line")
-    right = result.get("right_line")
-    segs  = result.get("segments", [])
+    left_segs  = result.get("left_segments", [])
+    right_segs = result.get("right_segments", [])
 
-    def is_valid(line):
-        if line is None:
-            return False
-        x1, y1, x2, y2 = line
-        dx = x2 - x1
-        dy = y2 - y1
-        slope = dy / (dx + 1e-9)
-        if abs(slope) < 0.3:
-            return False
-        return True
+    valid_left  = len(left_segs)  > 0
+    valid_right = len(right_segs) > 0
 
-    valid_left  = is_valid(left)
-    valid_right = is_valid(right)
-
-    # too many noisy segments
-    too_many_segs = len(segs) > 12
-
-    # check crossing (only if both lines exist)
     crossing = False
+
     if valid_left and valid_right:
-        lx1, ly1, lx2, ly2 = left
-        rx1, ry1, rx2, ry2 = right
+        # Use fitted lines
+        left_line  = result.get("left_line")
+        right_line = result.get("right_line")
 
-        # compare at bottom
-        if lx1 > rx1:
-            crossing = True
+        if left_line and right_line:
+            lx1, ly1, lx2, ly2 = left_line
+            rx1, ry1, rx2, ry2 = right_line
 
-        # compare at mid
-        mid_y = img_h // 2
-        def x_at(line, y):
-            x1, y1, x2, y2 = line
-            t = (y - y1) / (y2 - y1 + 1e-9)
-            return int(x1 + t * (x2 - x1))
-        if x_at(left, mid_y) > x_at(right, mid_y):
-            crossing = True
+            # Check bottom ordering: left must be to the left
+            if lx1 > rx1:
+                crossing = True
 
-    valid_frame = (valid_left and valid_right and not too_many_segs and not crossing)
+            # Check mid-height
+            mid_y = img_h // 2
+
+            def x_at(line, y):
+                x1, y1, x2, y2 = line
+                t = (y - y1) / (y2 - y1 + 1e-9)
+                return x1 + t * (x2 - x1)
+
+            if x_at(left_line, mid_y) > x_at(right_line, mid_y):
+                crossing = True
+
+    valid_frame = valid_left and valid_right and not crossing
 
     return {
-        "valid_left": valid_left,
+        "valid_left":  valid_left,
         "valid_right": valid_right,
-        "too_many_segs": too_many_segs,
-        "crossing": crossing,
+        "crossing":    crossing,
         "valid_frame": valid_frame,
     }
