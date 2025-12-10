@@ -16,29 +16,16 @@ def detect_lanes(
     hough_cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Classical lane extractor with a *late* neural prior gate.
-
-    Steps:
-      1) Color threshold on the full frame (white + optional yellow) → binary map.
-      2) Canny edges on that map.
-      3) Apply the road mask *after* edges, with a small dilation margin.
-      4) Hough segment detection; if nothing appears, relax the mask and finally try without it.
-      5) Split segments into left/right (by where they hit the bottom of the frame) and
-         fit one straight line per side for pose estimation.
-
-    Returns:
-      dict with:
-        - "segments":       all Hough segments
-        - "left_segments":  segments assigned to the left lane
-        - "right_segments": segments assigned to the right lane
-        - "left_line":      fitted line for left lane (or None)
-        - "right_line":     fitted line for right lane (or None)
-        - debug images: "hsv_mask", "edges", "edges_masked", "hough_vis"
+    Classical lane extractor with optional YOLOP road-mask.
+    Fixed so that classical-only mode works (no mask = no edge deletion).
     """
     h, w = bgr.shape[:2]
 
-    # (1) white + yellow thresholding
+    # ---------------------------------------------------------
+    # (1) WHITE + YELLOW HSV THRESHOLDING
+    # ---------------------------------------------------------
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+
     white_lower = np.array(hsv_cfg.get("white_lower", [0, 0, 200]), dtype=np.uint8)
     white_upper = np.array(hsv_cfg.get("white_upper", [180, 40, 255]), dtype=np.uint8)
     bin_white = cv2.inRange(hsv, white_lower, white_upper)
@@ -49,84 +36,81 @@ def detect_lanes(
 
     binm = cv2.bitwise_or(bin_white, bin_yellow)
 
-    # Remove isolated dots, then connect broken lane pixels
-    binm = cv2.morphologyEx(binm, cv2.MORPH_OPEN,  np.ones((5, 5),  np.uint8))
-    binm = cv2.morphologyEx(binm, cv2.MORPH_CLOSE, np.ones((7, 7),  np.uint8))
+    # clean small blobs
+    binm = cv2.morphologyEx(binm, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    binm = cv2.morphologyEx(binm, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
 
-    # Remove tiny blobs
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binm, connectivity=8)
-    min_area = 200  # tune: 100–400 depending on image size
-
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binm, 8)
     clean = np.zeros_like(binm)
-    for i in range(1, num_labels):  # skip background (0)
-        area = stats[i, cv2.CC_STAT_AREA]
-        if area >= min_area:
+    for i in range(1, num_labels):
+        if stats[i, cv2.CC_STAT_AREA] >= 200:
             clean[labels == i] = 255
     binm = clean
 
-    # hsv_mask debug image
+    # Debug HSV mask
     hsv_mask = binm.copy()
-    text = "HSV MASK"
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.7
-    thickness = 2
-    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
-    cv2.rectangle(hsv_mask, (0, 0), (tw + 10, th + 10), (0, 0, 0), thickness=-1)
-    cv2.putText(hsv_mask, text, (5, th + 5), font, scale, (255, 255, 255), thickness)
+    cv2.rectangle(hsv_mask, (0, 0), (130, 30), (0, 0, 0), -1)
+    cv2.putText(hsv_mask, "HSV MASK", (5, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 255, 2)
 
-    # (2) edges
+    # ---------------------------------------------------------
+    # (2) CANNY EDGES
+    # ---------------------------------------------------------
     low  = int(canny_cfg.get("low", 80))
     high = int(canny_cfg.get("high", 160))
     edges = cv2.Canny(binm, low, high)
 
-    # Remove small edge fragments
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(edges, connectivity=8)
+    # Remove very small edge fragments
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(edges, 8)
     clean_edges = np.zeros_like(edges)
-    min_edge_area = 150  # tune 100–300
-
     for i in range(1, num_labels):
-        if stats[i, cv2.CC_STAT_AREA] >= min_edge_area:
+        if stats[i, cv2.CC_STAT_AREA] >= 150:
             clean_edges[labels == i] = 255
     edges = clean_edges
 
-    text = "CANNY EDGES"
-    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
-    cv2.rectangle(edges, (0, 0), (tw + 10, th + 10), (0, 0, 0), thickness=-1)
-    cv2.putText(edges, text, (5, th + 5), font, scale, (255, 255, 255), thickness)
+    # annotate
+    cv2.rectangle(edges, (0, 0), (160, 30), (0, 0, 0), -1)
+    cv2.putText(edges, "CANNY EDGES", (5, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 255, 2)
 
-    # Remove edges above horizon (~35% height)
+    # remove sky
     horizon = int(0.35 * h)
     edges[:horizon, :] = 0
 
-    # (3) late mask gate with margin
-    edges_masked = edges.copy()
-    edges_masked = cv2.morphologyEx(edges_masked, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8))
+    # ---------------------------------------------------------
+    # (3) MASKED EDGES — FIXED FOR CLASSICAL-ONLY MODE
+    # ---------------------------------------------------------
 
     if road_mask is not None:
         margin = int(hsv_cfg.get("mask_margin", 7))
         if margin > 0:
-            k = np.ones((margin, margin), np.uint8)
-            rm = cv2.dilate(road_mask, k, iterations=1)
+            rm = cv2.dilate(road_mask, np.ones((margin, margin), np.uint8), 1)
         else:
             rm = road_mask
+
         edges_masked = cv2.bitwise_and(edges, edges, mask=rm)
         edges_masked[:horizon, :] = 0
+    else:
+        # *** FIX: previously edges were destroyed by a 7×7 OPEN ***
+        # For classical-only, keep edges as-is (optional small clean).
+        edges_masked = edges.copy()
+        # optional gentle open:
+        # edges_masked = cv2.morphologyEx(edges_masked, cv2.MORPH_OPEN, np.ones((3,3),np.uint8))
 
-    text = "MASKED EDGES"
-    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
-    cv2.rectangle(edges_masked, (0, 0), (tw + 10, th + 10), (0, 0, 0), thickness=-1)
-    cv2.putText(edges_masked, text, (5, th + 5), font, scale, (255, 255, 255), thickness)
+    # label
+    cv2.rectangle(edges_masked, (0, 0), (180, 30), (0, 0, 0), -1)
+    cv2.putText(edges_masked, "MASKED EDGES", (5, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 255, 2)
 
-    # (4) Hough with fallbacks
+    # ---------------------------------------------------------
+    # (4) HOUGH LINES
+    # ---------------------------------------------------------
     rho       = float(hough_cfg.get("rho", 1.0))
     theta_deg = float(hough_cfg.get("theta_deg", 1.0))
     thr       = int(hough_cfg.get("threshold", 30))
     min_len   = int(hough_cfg.get("min_len", 40))
     max_gap   = int(hough_cfg.get("max_gap", 20))
 
-    def hough_run(edge_img: np.ndarray) -> List[Line]:
+    def hough_run(img):
         lines = cv2.HoughLinesP(
-            edge_img,
+            img,
             rho,
             np.deg2rad(theta_deg),
             thr,
@@ -137,24 +121,25 @@ def detect_lanes(
 
     segments = hough_run(edges_masked)
 
+    # fallback if no segments and mask present
     if not segments and road_mask is not None:
-        size = max(11, 2 * int(hsv_cfg.get("mask_margin", 7)))
-        rm2 = cv2.dilate(road_mask, np.ones((size, size), np.uint8), iterations=1)
+        rm2 = cv2.dilate(road_mask, np.ones((15, 15), np.uint8), 1)
         segments = hough_run(cv2.bitwise_and(edges, edges, mask=rm2))
 
-    if not segments and road_mask is not None:
+    # fallback: no mask at all
+    if not segments:
         segments = hough_run(edges)
 
-    # (4b) create hough_vis image
+    # Draw Hough segments for debug
     hough_vis = bgr.copy()
     for (x1, y1, x2, y2) in segments:
-        cv2.line(hough_vis, (x1, y1), (x2, y2), (0, 255, 0), 2, cv2.LINE_AA)
-    text = "HOUGH LINES"
-    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
-    cv2.rectangle(hough_vis, (0, 0), (tw + 20, th + 20), (0, 0, 0), thickness=-1)
-    cv2.putText(hough_vis, text, (5, th + 5), font, scale, (255, 255, 255), thickness)
+        cv2.line(hough_vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    cv2.rectangle(hough_vis, (0, 0), (160, 30), (0, 0, 0), -1)
+    cv2.putText(hough_vis, "HOUGH LINES", (5, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 255, 2)
 
-    # (5) group and fit
+    # ---------------------------------------------------------
+    # (5) GROUP LEFT/RIGHT + FIT LINES
+    # ---------------------------------------------------------
     left_segs, right_segs = _split_left_right(segments, w, h)
     left_fit  = _fit_line_from_segments(left_segs, h)
     right_fit = _fit_line_from_segments(right_segs, h)
@@ -170,6 +155,7 @@ def detect_lanes(
         "edges_masked":   edges_masked,
         "hough_vis":      hough_vis,
     }
+
 
 
 def draw_lanes(img: np.ndarray, result: Dict[str, Any]) -> np.ndarray:

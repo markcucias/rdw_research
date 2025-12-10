@@ -8,9 +8,11 @@ src/classical_prior/roadnet_runtime.py
 src/classical_prior/state.py
 src/common/__init__.py
 src/common/io.py
+src/common/metrics.py
 src/common/video.py
 src/common/viz.py
-src/motion_fusion/__init__.py
+src/eval/__init__.py
+src/eval/eval_classical_x_accuracy.py
 src/motion_fusion/classical_prior.py
 src/motion_fusion/cli.py
 src/motion_fusion/filters.py
@@ -18,10 +20,12 @@ src/motion_fusion/lanenet_runtime.py
 src/motion_fusion/motion_fusion.py
 src/motion_fusion/odometry.py
 src/motion_fusion/pipeline.py
-src/motion_fusion/state.py
 src/rdw.egg-info/PKG-INFO
 src/rdw.egg-info/SOURCES.txt
 src/rdw.egg-info/dependency_links.txt
 src/rdw.egg-info/entry_points.txt
 src/rdw.egg-info/requires.txt
 src/rdw.egg-info/top_level.txt
+src/tools/__init__.py
+src/tools/annotate_gt_x.py
+src/tools/generator.py
