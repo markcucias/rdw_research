@@ -20,7 +20,9 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
       - Robustness benchmark (pose jumps)
       - CSV logging (overwrites data/benchmark_classical.csv each run)
 
-    All detection + quality logic remains exactly as in the user's working version.
+    Now also uses:
+      - lane-width sanity check via result["valid_lane"] from estimate_pose
+      - temporal smoothing and fallback to previous pose on bad frames
     """
     cap = open_source(source)
     if not cap.isOpened():
@@ -46,10 +48,11 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
 
     # --- kinematics ---
     fps   = float(kincfg.get("fps", 30.0))
-
     mpp   = float(kincfg.get("meters_per_pixel_bottom", 0.001))
     laneW = float(kincfg.get("assumed_lane_width_m", 1.2))
 
+    # коэффициент сглаживания для x и alpha (можно задать в yaml, если хочешь)
+    x_smooth_alpha = float(kincfg.get("x_smooth_alpha", 0.7))
 
     spd = SpeedEstimator(fps=fps, meters_per_pixel_bottom=mpp)
 
@@ -65,12 +68,14 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     bad_dx       = 0
     bad_da       = 0
 
+    # --- pose history for robustness + сглаживание ---
     prev_x     = None
     prev_alpha = None
     prev_valid = False
+    have_prev_pose = False
 
-    dx_thresh = 0.5
-    da_thresh = np.deg2rad(10.0)
+    dx_thresh = 0.5                 # м, порог для "скачков" x
+    da_thresh = np.deg2rad(10.0)    # рад, порог для "скачков" угла
 
     last_vis = None
 
@@ -151,17 +156,42 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         dil_k = int(pcfg.get("mask_dilate", 11))
         if dil_k > 0:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil_k, dil_k))
+
             mask = cv2.dilate(mask, kernel, 1)
 
         # 4) CLASSICAL LANES
         result = detect_lanes(frame, mask, hsv_cfg=hsvcfg, canny_cfg=canny, hough_cfg=hough)
 
-        # 5) DETECTION QUALITY
+        # 5) DETECTION QUALITY (по-прежнему, как было)
         quality = evaluate_detection_quality(result, w_img, h_img)
         print("DETECTION QUALITY:", quality)
 
-        # 6) POSE
-        x_m, alpha = estimate_pose(result, frame.shape, mpp, assumed_lane_width_m=laneW)
+        # 6) POSE (с учётом valid_lane и сглаживания)
+        x_raw, alpha_raw = estimate_pose(result, frame.shape, mpp, assumed_lane_width_m=laneW)
+        valid_lane = bool(result.get("valid_lane", True))
+
+        if valid_lane:
+            # сглаживаем относительно прошлого измерения, если оно есть
+            if have_prev_pose:
+                x_m     = x_smooth_alpha * x_raw     + (1.0 - x_smooth_alpha) * prev_x
+                alpha   = x_smooth_alpha * alpha_raw + (1.0 - x_smooth_alpha) * prev_alpha
+            else:
+                x_m   = x_raw
+                alpha = alpha_raw
+
+            prev_x = x_m
+            prev_alpha = alpha
+            have_prev_pose = True
+        else:
+            # плохая детекция: если есть история — держим прошлое значение
+            if have_prev_pose:
+                x_m   = prev_x
+                alpha = prev_alpha
+            else:
+                # первый кадр, ещё нечего держать
+                x_m   = x_raw
+                alpha = alpha_raw
+
         v_mps = spd.update(frame, mask)
 
         # Close full-pipeline timing
@@ -186,7 +216,7 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         # ROBUSTNESS METRICS
         # ============================================================
         valid_frame = bool(quality.get("valid_frame", False))
-        
+
         if valid_frame:
             good_frames += 1
 
@@ -199,8 +229,6 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
             if da > da_thresh:
                 bad_da += 1
 
-        prev_x = x_m
-        prev_alpha = alpha
         prev_valid = valid_frame
 
         # ============================================================

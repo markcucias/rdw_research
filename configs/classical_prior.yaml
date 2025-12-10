@@ -11,8 +11,8 @@ prior:
 
 kinematics:
   fps: 30
-  meters_per_pixel_bottom: 0.0006
-  assumed_lane_width_m: 1.2
+  meters_per_pixel_bottom: 0.003
+  assumed_lane_width_m: 2.5
 
 hsv:
   white_lower: [0, 0, 190]

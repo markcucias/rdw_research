@@ -22,10 +22,12 @@ def _centerline(left: Optional[Tuple[int,int,int,int]],
     # fallback: single side → assume lane width from config later (caller handles)
     raise ValueError("need at least one fitted line")
 
-def estimate_pose(result: Dict[str, Any],
-                  img_shape: Tuple[int,int, int],
-                  meters_per_pixel_bottom: float,
-                  assumed_lane_width_m: Optional[float] = None) -> Tuple[float, float]:
+def estimate_pose(
+    result: Dict[str, Any],
+    img_shape: Tuple[int,int, int],
+    meters_per_pixel_bottom: float,
+    assumed_lane_width_m: Optional[float] = None
+) -> Tuple[float, float]:
     """
     Return (x_m, alpha_rad) where:
       x_m        : lateral offset (camera center to lane center) at image bottom
@@ -35,11 +37,24 @@ def estimate_pose(result: Dict[str, Any],
     left = result.get("left_line")
     right = result.get("right_line")
 
+    # по умолчанию считаем, что измерение валидно
+    result["valid_lane"] = True          # <<< NEW
+    result["lane_width_px"] = None       # <<< NEW
+
     if left is None and right is None:
+        # ничего не нашли — говорим, что линия невалидна
+        result["valid_lane"] = False     # <<< NEW
         return 0.0, 0.0
+
+    lane_width_px = None                 # <<< NEW
 
     try:
         (xb, yb), (xh, yh) = _centerline(left, right, h, w)
+        # ширина полосы в пикселях по нижней строке кадра
+        if left is not None and right is not None:      # <<< NEW
+            x_left_bottom  = _x_at(left,  h - 1)        # <<< NEW
+            x_right_bottom = _x_at(right, h - 1)        # <<< NEW
+            lane_width_px  = abs(x_right_bottom - x_left_bottom)  # <<< NEW
     except ValueError:
         # one-sided fallback using assumed lane width
         if left is not None and assumed_lane_width_m is not None:
@@ -48,14 +63,32 @@ def estimate_pose(result: Dict[str, Any],
             xb = xb_left + lane_px // 2
             xh = _x_at(left, int(h * 0.6)) + lane_px // 2
             yb, yh = h - 1, int(h * 0.6)
+            lane_width_px = float(lane_px)              # <<< NEW
         elif right is not None and assumed_lane_width_m is not None:
             xb_right = _x_at(right, h - 1)
             lane_px = int(assumed_lane_width_m / max(meters_per_pixel_bottom, 1e-9))
             xb = xb_right - lane_px // 2
             xh = _x_at(right, int(h * 0.6)) - lane_px // 2
             yb, yh = h - 1, int(h * 0.6)
+            lane_width_px = float(lane_px)              # <<< NEW
         else:
+            result["valid_lane"] = False                # <<< NEW
             return 0.0, 0.0
+
+    # --- sanity-check ширины полосы ---                      <<< NEW BLOCK
+    if assumed_lane_width_m is not None and meters_per_pixel_bottom > 0.0 and lane_width_px is not None:
+        lane_width_px_expected = assumed_lane_width_m / meters_per_pixel_bottom
+        min_lane_px = 0.6 * lane_width_px_expected
+        max_lane_px = 1.4 * lane_width_px_expected
+
+        if lane_width_px < min_lane_px or lane_width_px > max_lane_px:
+            # просто помечаем, но НЕ обнуляем измерение
+            result["valid_lane"] = False
+            result["lane_width_px"] = lane_width_px
+        else:
+            result["valid_lane"] = True
+            result["lane_width_px"] = lane_width_px
+    # --- конец sanity-check блока ---                        <<< END NEW
 
     cx = w * 0.5
     dx_px = cx - xb                              # right is +, left is -
