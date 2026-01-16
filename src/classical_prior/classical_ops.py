@@ -156,6 +156,21 @@ def detect_lanes(
 
     # (5) group and fit
     left_segs, right_segs = _split_left_right(segments, w, h)
+
+    # First-pass fits (used only to score/clean segments)
+    left_fit0  = _fit_line_from_segments(left_segs, h)
+    right_fit0 = _fit_line_from_segments(right_segs, h)
+
+    # --- anti-clutter filtering that does NOT kill turns ---
+    tol_px = int(hsv_cfg.get("inlier_tol_px", 16))            # distance-to-fit tolerance
+    max_keep = int(hsv_cfg.get("inlier_max_keep", 10))        # keep only top-N per side
+    yb_strict = float(hsv_cfg.get("bottom_keep_ratio", 0.62)) # strict: keep segments whose bottom endpoint is low
+    yb_relax  = float(hsv_cfg.get("bottom_relax_ratio", 0.48))# relax for turns if strict removes too much
+
+    left_segs  = _keep_best_segments(left_segs,  left_fit0,  tol_px, max_keep, h, yb_strict, yb_relax)
+    right_segs = _keep_best_segments(right_segs, right_fit0, tol_px, max_keep, h, yb_strict, yb_relax)
+
+    # Final fits after cleaning
     left_fit  = _fit_line_from_segments(left_segs, h)
     right_fit = _fit_line_from_segments(right_segs, h)
 
@@ -189,16 +204,13 @@ def draw_lanes(img: np.ndarray, result: Dict[str, Any]) -> np.ndarray:
     right_segs = result.get("right_segments")
 
     if left_segs is None or right_segs is None:
-        # Fallback: just draw all segments in green
         for (x1, y1, x2, y2) in result.get("segments", []):
             cv2.line(out, (x1, y1), (x2, y2), (0, 200, 0), 2, cv2.LINE_AA)
         return out
 
-    # Left lane segments (blue-ish)
     for (x1, y1, x2, y2) in left_segs:
         cv2.line(out, (x1, y1), (x2, y2), (255, 100, 0), 3, cv2.LINE_AA)
 
-    # Right lane segments (green/orange-ish)
     for (x1, y1, x2, y2) in right_segs:
         cv2.line(out, (x1, y1), (x2, y2), (0, 255, 100), 3, cv2.LINE_AA)
 
@@ -225,13 +237,11 @@ def _split_left_right(
     cx = img_w * 0.5
 
     for x1, y1, x2, y2 in segments:
-        # endpoint closest to the bottom
         if y1 > y2:
             xb, yb = x1, y1
         else:
             xb, yb = x2, y2
 
-        # ignore segments that live too high (safety)
         if yb < img_h * 0.4:
             continue
 
@@ -243,7 +253,78 @@ def _split_left_right(
     return left, right
 
 
-    
+def _keep_best_segments(
+    segs: List[Line],
+    fit: FitLine,
+    tol_px: int,
+    max_keep: int,
+    img_h: int,
+    bottom_keep_ratio_strict: float,
+    bottom_keep_ratio_relax: float,
+) -> List[Line]:
+    """
+    Stops straight-road clutter:
+      1) Prefer segments whose LOWER endpoint is near the bottom (anchored).
+      2) Score by distance-to-fit and length.
+      3) If strict anchoring removes too much (turns), relax it.
+    """
+    if not segs or fit is None:
+        return segs
+
+    def seg_bottom_y(s: Line) -> int:
+        x1, y1, x2, y2 = s
+        return y1 if y1 > y2 else y2
+
+    # Precompute fit line distance helper
+    x1, y1, x2, y2 = fit
+    vx = float(x2 - x1)
+    vy = float(y2 - y1)
+    denom = (vx * vx + vy * vy) ** 0.5 + 1e-9
+
+    def point_line_dist(px: float, py: float) -> float:
+        return abs(vy * px - vx * py + x2 * y1 - y2 * x1) / denom
+
+    def score_segments(candidates: List[Line]) -> List[Line]:
+        scored = []
+        for ax, ay, bx, by in candidates:
+            dx = bx - ax
+            dy = by - ay
+            length = (dx * dx + dy * dy) ** 0.5
+
+            # reject near-horizontal junk (helps a lot on straight dataset)
+            if abs(dy) < 0.22 * abs(dx):
+                continue
+
+            d = 0.5 * (point_line_dist(ax, ay) + point_line_dist(bx, by))
+            if d <= tol_px:
+                scored.append((d, -length, (ax, ay, bx, by)))
+
+        if not scored:
+            return candidates
+
+        scored.sort(key=lambda t: (t[0], t[1]))
+        return [t[2] for t in scored[:max_keep]]
+
+    y_strict = int(bottom_keep_ratio_strict * img_h)
+    y_relax  = int(bottom_keep_ratio_relax * img_h)
+
+    strict = [s for s in segs if seg_bottom_y(s) >= y_strict]
+    kept = score_segments(strict)
+
+    # If we lost too much (common on turns), relax bottom constraint
+    if len(kept) < 2:
+        relax = [s for s in segs if seg_bottom_y(s) >= y_relax]
+        kept2 = score_segments(relax)
+        if len(kept2) >= 2:
+            return kept2
+
+    # Final safety: if still too few, do no bottom anchoring but still score
+    if len(kept) < 2:
+        kept3 = score_segments(segs)
+        return kept3 if len(kept3) >= 2 else segs
+
+    return kept
+
 
 def _fit_line_from_segments(segments: List[Line], img_h: int) -> FitLine:
     """
@@ -260,20 +341,15 @@ def _fit_line_from_segments(segments: List[Line], img_h: int) -> FitLine:
 
     pts_np = np.asarray(pts, dtype=np.float32)
 
-    # Try a robust cv2.fitLine
     try:
         vx, vy, x0, y0 = cv2.fitLine(
             pts_np, cv2.DIST_L2, 0, 0.01, 0.01
         ).reshape(-1).tolist()
     except:
-        # Fallback: average segment
         xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
         x_mean = int(np.mean(xs))
-        # draw vertical line as fallback
         return (x_mean, img_h - 1, x_mean, int(img_h * 0.6))
 
-    # Extrapolate line to bottom and 60% height
     yb = img_h - 1
     yh = int(img_h * 0.6)
 
@@ -282,8 +358,6 @@ def _fit_line_from_segments(segments: List[Line], img_h: int) -> FitLine:
         return int(x0 + t * vx)
 
     return (x_at(yb), yb, x_at(yh), yh)
-
-
 
 
 def evaluate_detection_quality(result: Dict[str, Any], img_w: int, img_h: int) -> Dict[str, bool]:
@@ -302,7 +376,6 @@ def evaluate_detection_quality(result: Dict[str, Any], img_w: int, img_h: int) -
     crossing = False
 
     if valid_left and valid_right:
-        # Use fitted lines
         left_line  = result.get("left_line")
         right_line = result.get("right_line")
 
@@ -310,11 +383,9 @@ def evaluate_detection_quality(result: Dict[str, Any], img_w: int, img_h: int) -
             lx1, ly1, lx2, ly2 = left_line
             rx1, ry1, rx2, ry2 = right_line
 
-            # Check bottom ordering: left must be to the left
             if lx1 > rx1:
                 crossing = True
 
-            # Check mid-height
             mid_y = img_h // 2
 
             def x_at(line, y):

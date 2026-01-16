@@ -36,6 +36,21 @@ def _to_bgr(img, ref):
     return img
 
 
+def _build_mask(prob2: np.ndarray, pcfg: Dict[str, Any], *, thr: float, er: int, dil: int) -> np.ndarray:
+    """Build binary mask from prob2 with given params (no extra YOLOP calls)."""
+    mask = (prob2 >= thr).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+
+    if er > 0:
+        mask = cv2.erode(mask, np.ones((er, er), np.uint8), 1)
+
+    if dil > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil, dil))
+        mask = cv2.dilate(mask, kernel, 1)
+
+    return mask
+
+
 # -------------------------------------------------------------
 # MAIN PIPELINE — WITH NEURAL PRIOR FUSION
 # -------------------------------------------------------------
@@ -74,6 +89,14 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     prev_prob = None
 
     # -------------------------------
+    # SPEED-UP CONTROLS
+    # -------------------------------
+    prior_stride = int(pcfg.get("prior_stride", 4))
+    infer_size = pcfg.get("prior_infer_size", [416, 416])
+    infer_w = int(infer_size[0])
+    infer_h = int(infer_size[1])
+
+    # -------------------------------
     # EFFICIENCY + ROBUSTNESS METRICS
     # -------------------------------
     total_full_ms = 0.0
@@ -106,9 +129,11 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
 
     frame_idx = 0
 
-    # ============================================================
-    # MAIN LOOP
-    # ============================================================
+    cached_prob_da = None
+    cached_prob_ll = None
+
+    last_grid = None
+
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -117,26 +142,38 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         total_frames += 1
         h_img, w_img = frame.shape[:2]
 
-        # ============================================================
-        # FULL PIPELINE TIMING START
-        # ============================================================
         t0_full = time.perf_counter()
 
         # ------------------------------------------------------------
-        # 1. PRIOR → probabilities
+        # 1) PRIOR INFERENCE (strided + small infer)
         # ------------------------------------------------------------
-        if hasattr(prior, "infer_probs"):
-            prob_da, prob_ll = prior.infer_probs(frame)
+        ran_prior = False
+
+        if (frame_idx % prior_stride == 0) or (cached_prob_da is None) or (cached_prob_ll is None):
+            small = cv2.resize(frame, (infer_w, infer_h), interpolation=cv2.INTER_AREA)
+
+            if hasattr(prior, "infer_probs"):
+                prob_da_s, prob_ll_s = prior.infer_probs(small)
+            else:
+                raw_s = prior.infer_mask(small)
+                prob_da_s = raw_s.astype(np.float32) / 255.0
+                prob_ll_s = np.zeros_like(prob_da_s)
+
+            prob_da = cv2.resize(prob_da_s, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
+            prob_ll = cv2.resize(prob_ll_s, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
+
+            cached_prob_da = prob_da.copy()
+            cached_prob_ll = prob_ll.copy()
+            ran_prior = True
         else:
-            raw = prior.infer_mask(frame)
-            prob_da = raw.astype(np.float32) / 255.0
-            prob_ll = np.zeros_like(prob_da)
+            prob_da = cached_prob_da
+            prob_ll = cached_prob_ll
 
         # ------------------------------------------------------------
-        # 2. PROBABILITY FUSION + TEMPORAL SMOOTHING
+        # 2) FUSION + TEMPORAL SMOOTHING
         # ------------------------------------------------------------
         lane_boost = cv2.GaussianBlur(prob_ll, (0, 0), 1.0)
-        prob = np.maximum(prob_da, np.minimum(1.0, lane_boost * 1.2))
+        prob = np.maximum(prob_da, np.minimum(1.0, lane_boost * 1.2)).astype(np.float32)
 
         if prev_prob is None:
             prev_prob = prob.copy()
@@ -145,55 +182,84 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
             prev_prob = prob.copy()
 
         # ------------------------------------------------------------
-        # 3. SUPPRESS SKY + GRASS
+        # 3) SUPPRESS SKY + GRASS
         # ------------------------------------------------------------
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         Hc, Sc, Vc = cv2.split(hsv)
 
         horizon = int(pcfg.get("horizon_ratio", 0.35) * h_img)
-        prob[:horizon, :] *= 0.2
+
+        prob2 = prob.copy()
+        prob2[:horizon, :] *= 0.2
 
         grass = ((Hc >= 35) & (Hc <= 85) & (Sc >= 60)).astype(np.uint8) * 255
         grass = cv2.morphologyEx(grass, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-        prob *= (1.0 - 0.9 * (grass / 255.0))
+        prob2 *= (1.0 - 0.9 * (grass.astype(np.float32) / 255.0))
 
         sky = (Vc > 180).astype(np.float32)
-        prob *= (1.0 - 0.8 * sky)
+        prob2 *= (1.0 - 0.8 * sky)
 
         # ------------------------------------------------------------
-        # 4. BINARY ROAD MASK
+        # 4) MASK (default params)
         # ------------------------------------------------------------
-        mask = (prob >= float(pcfg.get("threshold", 0.65))).astype(np.uint8) * 255
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        base_thr = float(pcfg.get("threshold", 0.65))
+        base_er  = int(pcfg.get("mask_erode", 6))
+        base_dil = int(pcfg.get("mask_dilate", 11))
 
-        er = int(pcfg.get("mask_erode", 6))
-        if er > 0:
-            mask = cv2.erode(mask, np.ones((er, er), np.uint8), 1)
-
-        dil = int(pcfg.get("mask_dilate", 11))
-        if dil > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil, dil))
-            mask = cv2.dilate(mask, kernel, 1)
+        mask = _build_mask(prob2, pcfg, thr=base_thr, er=base_er, dil=base_dil)
 
         # ------------------------------------------------------------
-        # 5. CLASSICAL LANES
+        # 5) CLASSICAL LANES (masked)
         # ------------------------------------------------------------
         result = detect_lanes(frame, mask, hsvcfg, canny, hough)
-
         quality = evaluate_detection_quality(result, w_img, h_img)
         print("DETECTION QUALITY:", quality)
 
+        # ------------------------------------------------------------
+        # TURN FIX: fallback BEFORE rerunning YOLOP
+        #
+        # If masked result is invalid, try:
+        #   (A) relaxed mask (same prob2, lower thr, more dil)
+        #   (B) classical-only (no mask) and use if valid
+        # ------------------------------------------------------------
+        if not quality.get("valid_frame", False):
+            relaxed_thr = max(0.45, base_thr - 0.08)
+            relaxed_dil = int(max(base_dil, base_dil + 6))
+            relaxed_er  = int(max(0, base_er - 2))
+
+            mask_relaxed = _build_mask(prob2, pcfg, thr=relaxed_thr, er=relaxed_er, dil=relaxed_dil)
+            result_relaxed = detect_lanes(frame, mask_relaxed, hsvcfg, canny, hough)
+            quality_relaxed = evaluate_detection_quality(result_relaxed, w_img, h_img)
+
+            if quality_relaxed.get("valid_frame", False):
+                mask = mask_relaxed
+                result = result_relaxed
+                quality = quality_relaxed
+                print("DETECTION QUALITY (RELAXED MASK):", quality)
+            else:
+                # Classical-only fallback (very cheap) for turns where mask cuts a lane.
+                result_class_fallback = detect_lanes(frame, None, hsvcfg, canny, hough)
+                quality_class_fallback = evaluate_detection_quality(result_class_fallback, w_img, h_img)
+
+                if quality_class_fallback.get("valid_frame", False):
+                    # Keep mask for speed estimator, but use classical-only lanes for pose/robustness.
+                    result = result_class_fallback
+                    quality = quality_class_fallback
+                    print("DETECTION QUALITY (CLASSICAL FALLBACK):", quality)
+
+        # ------------------------------------------------------------
+        # 6) POSE + SPEED
+        # ------------------------------------------------------------
         x_m, alpha = estimate_pose(result, frame.shape, mpp, laneW)
         v_mps = spd.update(frame, mask)
 
-        # CLOSE TIMING
         t1_full = time.perf_counter()
         dt_full = (t1_full - t0_full) * 1000.0
         total_full_ms += dt_full
         n_full += 1
 
         # ------------------------------------------------------------
-        # CLASSICAL-ONLY TIMING
+        # CLASSICAL-ONLY TIMING (unchanged)
         # ------------------------------------------------------------
         t0_class = time.perf_counter()
         result_class = detect_lanes(frame, None, hsvcfg, canny, hough)
@@ -202,9 +268,9 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         total_class_ms += dt_class
         n_class += 1
 
-        # ============================================================
+        # ------------------------------------------------------------
         # ROBUSTNESS
-        # ============================================================
+        # ------------------------------------------------------------
         valid = bool(quality.get("valid_frame"))
         if valid:
             good_frames += 1
@@ -212,16 +278,18 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         if prev_valid and valid and prev_x is not None:
             dx = abs(x_m - prev_x)
             da = abs(alpha - prev_a)
-            if dx > dx_thresh: bad_dx += 1
-            if da > da_thresh: bad_da += 1
+            if dx > dx_thresh:
+                bad_dx += 1
+            if da > da_thresh:
+                bad_da += 1
 
         prev_x = x_m
         prev_a = alpha
         prev_valid = valid
 
-        # ============================================================
+        # ------------------------------------------------------------
         # CSV LOGGING
-        # ============================================================
+        # ------------------------------------------------------------
         now = time.perf_counter()
         dt_sec = now - prev_time if frame_idx > 0 else 0
         prev_time = now
@@ -235,25 +303,21 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         ])
         csv_file.flush()
 
-        # ============================================================
-        # VISUALIZATION — FULL 6-PANEL GRID
-        # ============================================================
+        # ------------------------------------------------------------
+        # VISUALIZATION (6-panel)
+        # ------------------------------------------------------------
         if display:
-
-            # Fused mask overlay
             color = np.zeros_like(frame)
             color[..., 1] = mask
             color[..., 2] = mask
             fused_overlay = cv2.addWeighted(frame, 0.65, color, 0.35, 0.0)
 
-            # Raw debug outputs
             hsv_mask     = _to_bgr(result.get("hsv_mask"), frame)
             edges        = _to_bgr(result.get("edges"), frame)
             edges_masked = _to_bgr(result.get("edges_masked"), frame)
             hough_vis    = _to_bgr(result.get("hough_vis"), frame)
             final_lanes  = draw_lanes(frame.copy(), result)
 
-            # LABEL EVERYTHING
             p1 = _put_label(fused_overlay, "FUSED PRIOR MASK")
             p2 = _put_label(hsv_mask, "HSV MASK")
             p3 = _put_label(edges, "CANNY EDGES")
@@ -263,7 +327,6 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
 
             panels = [p1, p2, p3, p4, p5, p6]
 
-            # Resize for 2×3 grid
             half = (w_img // 2, h_img // 2)
             panels = [cv2.resize(p, half, interpolation=cv2.INTER_AREA) for p in panels]
 
@@ -273,17 +336,21 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
             ])
 
             cv2.imshow("RDW - Neural Fusion + Classical Debug Grid", grid)
+            last_grid = grid
 
             if (cv2.waitKey(1) & 0xFF) == 27:
                 break
 
         frame_idx += 1
 
-    # ============================================================
-    # END — PRINT STATS
-    # ============================================================
     cap.release()
     csv_file.close()
+
+    if display and last_grid is not None:
+        cv2.imshow("RDW - Neural Fusion + Classical Debug Grid (FINAL)", last_grid)
+        print("Press any key to exit.")
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
     if n_full > 0:
         avg_full = total_full_ms / n_full
@@ -293,7 +360,6 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         avg_class = total_class_ms / n_class
         print(f"Average CLASSICAL-ONLY time: {avg_class:.2f} ms ({1000/avg_class:.1f} FPS)\n")
 
-    # Robustness summary
     if total_frames > 0:
         print("\n========== ROBUSTNESS SUMMARY ==========")
         print(f"total_frames: {total_frames}")
