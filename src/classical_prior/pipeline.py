@@ -34,6 +34,7 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     canny  = cfg.get("canny", {}) or {}
     hough  = cfg.get("hough", {}) or {}
     kincfg = cfg.get("kinematics", {}) or {}
+    y_ref_ratio = float(kincfg.get("y_ref_ratio", 0.65))
 
     prev_prob = None
 
@@ -167,7 +168,7 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         print("DETECTION QUALITY:", quality)
 
         # 6) POSE (с учётом valid_lane и сглаживания)
-        x_raw, alpha_raw = estimate_pose(result, frame.shape, mpp, assumed_lane_width_m=laneW)
+        x_raw, alpha_raw = estimate_pose(result, frame.shape, mpp, assumed_lane_width_m=laneW,  y_ref_ratio = y_ref_ratio)
         valid_lane = bool(result.get("valid_lane", True))
 
         if valid_lane:
@@ -205,7 +206,7 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         # ============================================================
         t0_classical = time.perf_counter()
         result_classical = detect_lanes(frame, None, hsv_cfg=hsvcfg, canny_cfg=canny, hough_cfg=hough)
-        _ = estimate_pose(result_classical, frame.shape, mpp, assumed_lane_width_m=laneW)
+        _ = estimate_pose(result_classical, frame.shape, mpp, assumed_lane_width_m=laneW, y_ref_ratio=y_ref_ratio)
         t1_classical = time.perf_counter()
 
         dt_classical_ms = (t1_classical - t0_classical) * 1000.0

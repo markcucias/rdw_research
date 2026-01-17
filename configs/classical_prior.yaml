@@ -10,9 +10,10 @@ prior:
   suppress_green: true
 
 kinematics:
-  fps: 30
+  fps: 15
   meters_per_pixel_bottom: 0.003
   assumed_lane_width_m: 2.5
+  y_ref_ratio: 0.65
 
 hsv:
   white_lower: [0, 0, 190]

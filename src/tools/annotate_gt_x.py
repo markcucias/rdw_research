@@ -9,7 +9,7 @@ import argparse
 def annotate_folder(
     img_dir: Path,
     out_csv: Path,
-    lane_width_m: float = 3.5,
+    lane_width_m: float = 2.5,
 ):
     img_paths = sorted(
         [p for p in img_dir.iterdir() if p.suffix.lower() in [".png", ".jpg", ".jpeg"]]
@@ -167,7 +167,7 @@ def main():
     parser.add_argument(
         "--out",
         type=str,
-        default="data/gt_classical_x1.csv",
+        default="data/gt_classical_x2.csv",
         help="Output CSV for ground truth.",
     )
     parser.add_argument(
