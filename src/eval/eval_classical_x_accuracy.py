@@ -47,7 +47,7 @@ def main():
     parser.add_argument(
         "--gt",
         type=str,
-        default="data/gt_center_130.csv",
+        default="data/gt_classical_x.csv",
         help="Path to ground-truth CSV (frame_idx,filename,x_gt_m,scenario).",
     )
     parser.add_argument(
