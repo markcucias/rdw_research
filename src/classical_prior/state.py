@@ -3,33 +3,60 @@ from typing import Dict, Any, Optional, Tuple
 import numpy as np
 import cv2
 
-def _x_at(line: Tuple[int,int,int,int], y: int) -> int:
+
+def _x_at(line: Tuple[int, int, int, int], y: int) -> int:
     x1, y1, x2, y2 = line
-    if abs(x2 - x1) < 1:  # vertical guard
+    if abs(x2 - x1) < 1:  # почти вертикальная
         return x1
     t = (y - y1) / (y2 - y1 + 1e-9)
     return int(x1 + t * (x2 - x1))
 
-def _centerline(left: Optional[Tuple[int,int,int,int]],
-                right: Optional[Tuple[int,int,int,int]],
-                img_h: int, img_w: int) -> Tuple[Tuple[int,int], Tuple[int,int]]:
-    yb = img_h - 1
-    yh = int(img_h * 0.6)
+
+def _centerline(
+    left: Optional[Tuple[int, int, int, int]],
+    right: Optional[Tuple[int, int, int, int]],
+    img_h: int,
+    img_w: int,
+    y_ref_ratio: Optional[float] = None,
+) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """
+    Возвращает две точки центр-линии:
+      (xb, yb) – ближе к камере
+      (xh, yh) – чуть выше
+    Если y_ref_ratio задан, работаем вокруг этой высоты.
+    Если нет – старое поведение: низ кадра + 0.6*h.
+    """
+    if y_ref_ratio is None:
+        yb = img_h - 1
+        yh = int(img_h * 0.6)
+    else:
+        # "нижняя" точка – там, где мы хотим измерять x
+        yb = int(img_h * y_ref_ratio)
+        # вторая точка – немного выше (10% высоты), но не вылезаем за кадр
+        dy = int(img_h * 0.1)
+        yh = max(0, yb - dy)
+
     if left is not None and right is not None:
         xb = int(0.5 * (_x_at(left, yb) + _x_at(right, yb)))
         xh = int(0.5 * (_x_at(left, yh) + _x_at(right, yh)))
         return (xb, yb), (xh, yh)
-    # fallback: single side → assume lane width from config later (caller handles)
+
+    # если только одна линия – fallback обрабатывается в estimate_pose
     raise ValueError("need at least one fitted line")
 
-def estimate_pose(result: Dict[str, Any],
-                  img_shape: Tuple[int,int, int],
-                  meters_per_pixel_bottom: float,
-                  assumed_lane_width_m: Optional[float] = None) -> Tuple[float, float]:
+
+def estimate_pose(
+    result: Dict[str, Any],
+    img_shape: Tuple[int, int, int],
+    meters_per_pixel_bottom: float,
+    assumed_lane_width_m: Optional[float] = None,
+    y_ref_ratio: Optional[float] = None,
+) -> Tuple[float, float]:
     """
-    Return (x_m, alpha_rad) where:
-      x_m        : lateral offset (camera center to lane center) at image bottom
-      alpha_rad  : heading of lane centerline relative to camera vertical (right-handed)
+    Возвращает (x_m, alpha_rad), где:
+      x_m       : боковое смещение центра полосы относительно центра кадра
+                  на высоте y_ref (если задан) или внизу кадра (по-старому)
+      alpha_rad : угол центр-линии относительно вертикали (0 = прямо, + вправо)
     """
     h, w = img_shape[:2]
     left = result.get("left_line")
@@ -38,35 +65,48 @@ def estimate_pose(result: Dict[str, Any],
     if left is None and right is None:
         return 0.0, 0.0
 
+    # пробуем использовать обе линии
     try:
-        (xb, yb), (xh, yh) = _centerline(left, right, h, w)
+        (xb, yb), (xh, yh) = _centerline(left, right, h, w, y_ref_ratio=y_ref_ratio)
     except ValueError:
-        # one-sided fallback using assumed lane width
-        if left is not None and assumed_lane_width_m is not None:
-            xb_left = _x_at(left, h - 1)
-            lane_px = int(assumed_lane_width_m / max(meters_per_pixel_bottom, 1e-9))
+        # fallback: только одна линия + предполагаемая ширина полосы
+        if assumed_lane_width_m is None or meters_per_pixel_bottom <= 0:
+            return 0.0, 0.0
+
+        lane_px = int(assumed_lane_width_m / max(meters_per_pixel_bottom, 1e-9))
+
+        # выбираем референсную высоту
+        if y_ref_ratio is None:
+            yb = h - 1
+            yh = int(h * 0.6)
+        else:
+            yb = int(h * y_ref_ratio)
+            dy = int(h * 0.1)
+            yh = max(0, yb - dy)
+
+        if left is not None:
+            xb_left = _x_at(left, yb)
             xb = xb_left + lane_px // 2
-            xh = _x_at(left, int(h * 0.6)) + lane_px // 2
-            yb, yh = h - 1, int(h * 0.6)
-        elif right is not None and assumed_lane_width_m is not None:
-            xb_right = _x_at(right, h - 1)
-            lane_px = int(assumed_lane_width_m / max(meters_per_pixel_bottom, 1e-9))
+            xh = _x_at(left, yh) + lane_px // 2
+        elif right is not None:
+            xb_right = _x_at(right, yb)
             xb = xb_right - lane_px // 2
-            xh = _x_at(right, int(h * 0.6)) - lane_px // 2
-            yb, yh = h - 1, int(h * 0.6)
+            xh = _x_at(right, yh) - lane_px // 2
         else:
             return 0.0, 0.0
 
+    # центр камеры
     cx = w * 0.5
-    dx_px = cx - xb                              # right is +, left is -
-    x_m   = dx_px * meters_per_pixel_bottom
+    dx_px = cx - xb           # вправо +, влево -
+    x_m = dx_px * meters_per_pixel_bottom
 
-    # heading: angle of lane centerline relative to vertical axis
+    # направление центр-линии
     vx = float(xh - xb)
-    vy = float(yh - yb)  # negative (upward)
-    alpha = np.arctan2(vx, -vy)                  # 0 = straight, + right yaw
+    vy = float(yh - yb)       # вверх отрицательное
+    alpha = np.arctan2(vx, -vy)
 
     return float(x_m), float(alpha)
+
 
 class SpeedEstimator:
     """
