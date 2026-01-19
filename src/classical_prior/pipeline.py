@@ -13,16 +13,42 @@ from .roadnet_runtime import PriorRuntime
 from .state import estimate_pose, SpeedEstimator
 
 
+# -------------------------------------------------------------
+# helpers for debug grid
+# -------------------------------------------------------------
+def _put_label(img: np.ndarray, text: str) -> np.ndarray:
+    """Draw a black box with white text in the top-left corner."""
+    out = img.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.6
+    thick = 2
+    (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
+    cv2.rectangle(out, (0, 0), (tw + 12, th + 12), (0, 0, 0), -1)
+    cv2.putText(out, text, (6, th + 6), font, scale, (255, 255, 255), thick)
+    return out
+
+
+def _to_bgr(img: np.ndarray | None, ref: np.ndarray) -> np.ndarray:
+    """Ensure every debug image is 3-channel BGR and non-None."""
+    if img is None:
+        return np.zeros_like(ref)
+    if img.ndim == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return img
+
+
+# -------------------------------------------------------------
+# MAIN PIPELINE — Classical + YOLOP prior
+# -------------------------------------------------------------
 def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     """
     Classical + neural-prior pipeline with:
       - Efficiency benchmark (full vs classical-only)
       - Robustness benchmark (pose jumps)
       - CSV logging (overwrites data/benchmark_classical.csv each run)
+      - 6-panel debug grid when display=True
 
-    Now also uses:
-      - lane-width sanity check via result["valid_lane"] from estimate_pose
-      - temporal smoothing and fallback to previous pose on bad frames
+    Логика детекции/оценки позы сохраняется, мы только меняем визуализацию.
     """
     cap = open_source(source)
     if not cap.isOpened():
@@ -52,7 +78,7 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     mpp   = float(kincfg.get("meters_per_pixel_bottom", 0.001))
     laneW = float(kincfg.get("assumed_lane_width_m", 1.2))
 
-    # коэффициент сглаживания для x и alpha (можно задать в yaml, если хочешь)
+    # сглаживание x и alpha
     x_smooth_alpha = float(kincfg.get("x_smooth_alpha", 0.7))
 
     spd = SpeedEstimator(fps=fps, meters_per_pixel_bottom=mpp)
@@ -78,8 +104,6 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     dx_thresh = 0.5                 # м, порог для "скачков" x
     da_thresh = np.deg2rad(10.0)    # рад, порог для "скачков" угла
 
-    last_vis = None
-
     # ================================================================
     # CSV FILE (rewritten every run)
     # ================================================================
@@ -90,12 +114,12 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     csv_writer.writerow(["frame_idx", "x_m", "alpha_deg", "v_mps", "dt_sec"])
 
     prev_time = time.perf_counter()
+    frame_idx = 0
+    last_grid = None
 
     # ================================================================
     # MAIN LOOP
     # ================================================================
-    frame_idx = 0
-
     while True:
         ok, frame = cap.read()
         if not ok or frame is None:
@@ -157,25 +181,29 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         dil_k = int(pcfg.get("mask_dilate", 11))
         if dil_k > 0:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil_k, dil_k))
-
             mask = cv2.dilate(mask, kernel, 1)
 
         # 4) CLASSICAL LANES
         result = detect_lanes(frame, mask, hsv_cfg=hsvcfg, canny_cfg=canny, hough_cfg=hough)
 
-        # 5) DETECTION QUALITY (по-прежнему, как было)
+        # 5) DETECTION QUALITY
         quality = evaluate_detection_quality(result, w_img, h_img)
         print("DETECTION QUALITY:", quality)
 
         # 6) POSE (с учётом valid_lane и сглаживания)
-        x_raw, alpha_raw = estimate_pose(result, frame.shape, mpp, assumed_lane_width_m=laneW,  y_ref_ratio = y_ref_ratio)
+        x_raw, alpha_raw = estimate_pose(
+            result,
+            frame.shape,
+            meters_per_pixel_bottom=mpp,
+            assumed_lane_width_m=laneW,
+            y_ref_ratio=y_ref_ratio,
+        )
         valid_lane = bool(result.get("valid_lane", True))
 
         if valid_lane:
-            # сглаживаем относительно прошлого измерения, если оно есть
             if have_prev_pose:
-                x_m     = x_smooth_alpha * x_raw     + (1.0 - x_smooth_alpha) * prev_x
-                alpha   = x_smooth_alpha * alpha_raw + (1.0 - x_smooth_alpha) * prev_alpha
+                x_m   = x_smooth_alpha * x_raw     + (1.0 - x_smooth_alpha) * prev_x
+                alpha = x_smooth_alpha * alpha_raw + (1.0 - x_smooth_alpha) * prev_alpha
             else:
                 x_m   = x_raw
                 alpha = alpha_raw
@@ -184,12 +212,10 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
             prev_alpha = alpha
             have_prev_pose = True
         else:
-            # плохая детекция: если есть история — держим прошлое значение
             if have_prev_pose:
                 x_m   = prev_x
                 alpha = prev_alpha
             else:
-                # первый кадр, ещё нечего держать
                 x_m   = x_raw
                 alpha = alpha_raw
 
@@ -206,7 +232,13 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         # ============================================================
         t0_classical = time.perf_counter()
         result_classical = detect_lanes(frame, None, hsv_cfg=hsvcfg, canny_cfg=canny, hough_cfg=hough)
-        _ = estimate_pose(result_classical, frame.shape, mpp, assumed_lane_width_m=laneW, y_ref_ratio=y_ref_ratio)
+        _ = estimate_pose(
+            result_classical,
+            frame.shape,
+            meters_per_pixel_bottom=mpp,
+            assumed_lane_width_m=laneW,
+            y_ref_ratio=y_ref_ratio,
+        )
         t1_classical = time.perf_counter()
 
         dt_classical_ms = (t1_classical - t0_classical) * 1000.0
@@ -249,23 +281,46 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
         csv_file.flush()
 
         # ============================================================
-        # VISUALIZATION
+        # VISUALIZATION — 6-panel debug grid
         # ============================================================
-        vis = draw_lanes(frame.copy(), result)
-
-        label = "FINAL LANES"
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale, thick = 0.7, 2
-        (tw, th), _ = cv2.getTextSize(label, font, scale, thick)
-        cv2.rectangle(vis, (0, 0), (tw + 20, th + 20), (0, 0, 0), -1)
-        cv2.putText(vis, label, (5, th + 5), font, scale, (255, 255, 255), thick)
-
         if display:
-            cv2.imshow("RDW - Final", vis)
+            # fused prior mask
+            color = np.zeros_like(frame)
+            color[..., 1] = mask
+            color[..., 2] = mask
+            fused_overlay = cv2.addWeighted(frame, 0.65, color, 0.35, 0.0)
+
+            hsv_mask     = _to_bgr(result.get("hsv_mask"), frame)
+            edges        = _to_bgr(result.get("edges"), frame)
+            edges_masked = _to_bgr(result.get("edges_masked"), frame)
+            hough_vis    = _to_bgr(result.get("hough_vis"), frame)
+            final_lanes  = draw_lanes(frame.copy(), result)
+
+            p1 = _put_label(fused_overlay, "FUSED PRIOR MASK")
+            p2 = _put_label(hsv_mask,      "HSV MASK")
+            p3 = _put_label(edges,         "CANNY EDGES")
+            p4 = _put_label(edges_masked,  "MASKED EDGES")
+            p5 = _put_label(hough_vis,     "HOUGH LINES")
+            p6 = _put_label(final_lanes,   "FINAL LANES")
+
+            panels = [p1, p2, p3, p4, p5, p6]
+            half = (w_img // 2, h_img // 2)
+            panels = [cv2.resize(p, half, interpolation=cv2.INTER_AREA) for p in panels]
+
+            grid = np.vstack([
+                np.hstack(panels[0:3]),
+                np.hstack(panels[3:6]),
+            ])
+
+            cv2.imshow("RDW - Classical + Prior Debug Grid", grid)
+            last_grid = grid
+
             if (cv2.waitKey(1) & 0xFF) == 27:
                 break
 
-        last_vis = vis
+        # консольный вывод для дебага
+        print(f"{source} | frame={frame_idx:04d} | x={x_m:+.3f} m | v={v_mps:+.3f} m/s | alpha={np.degrees(alpha):+.2f}°")
+
         frame_idx += 1
 
     # ============================================================
@@ -273,6 +328,12 @@ def run(source: str, cfg: Dict[str, Any], display: bool = False) -> int:
     # ============================================================
     cap.release()
     csv_file.close()
+
+    if display and last_grid is not None:
+        cv2.imshow("RDW - Classical + Prior Debug Grid (FINAL)", last_grid)
+        print("Press any key to exit.")
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
     if n_full > 0:
         avg_full = total_full_ms / n_full
